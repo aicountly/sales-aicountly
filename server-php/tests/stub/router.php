@@ -103,6 +103,19 @@ if (str_contains($path, '/v1/reservations') && $method === 'POST') {
     echo json_encode(['data' => remember($store, $seen, $key, $payload)]);
     exit;
 }
+/**
+ * Posted documents are remembered by their source so `by-source` can answer,
+ * which is what the three-way match reads to learn what actually arrived.
+ */
+$documentStore = sys_get_temp_dir() . '/stub-documents.json';
+$documents = is_file($documentStore) ? (json_decode((string) file_get_contents($documentStore), true) ?: []) : [];
+
+if (str_contains($path, '/v1/inventory-documents/by-source')) {
+    $sourceKey = ($_GET['source_app'] ?? '') . '|' . ($_GET['source_document_type'] ?? '') . '|' . ($_GET['source_document_id'] ?? '');
+    echo json_encode(['data' => $documents[$sourceKey] ?? []]);
+    exit;
+}
+
 if (str_contains($path, '/v1/inventory-documents/post')) {
     $payload = [
         'document_id'   => 7000 + $n,
@@ -116,6 +129,15 @@ if (str_contains($path, '/v1/inventory-documents/post')) {
             'valuation_rate'  => 80.0,
         ], $body['lines'] ?? []),
     ];
+
+    // Only an inward document counts as a receipt for by-source purposes; a
+    // return going out must not read back as more goods arriving.
+    if (($body['document_type'] ?? '') === 'PURCHASE_RECEIPT') {
+        $sourceKey = ($body['source_app'] ?? '') . '|' . ($body['source_document_type'] ?? '') . '|' . ($body['source_document_id'] ?? '');
+        $documents[$sourceKey][] = $payload;
+        file_put_contents($documentStore, json_encode($documents));
+    }
+
     echo json_encode(['data' => remember($store, $seen, $key, $payload)]);
     exit;
 }

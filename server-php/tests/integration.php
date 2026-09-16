@@ -149,6 +149,7 @@ function resetDatabase(): void
     Db::connect()->exec('TRUNCATE ' . implode(', ', $tables) . ', sales_audit_log RESTART IDENTITY CASCADE');
     @unlink(sys_get_temp_dir() . '/stub-idempotency.json');
     @unlink(sys_get_temp_dir() . '/stub-requests.jsonl');
+    @unlink(sys_get_temp_dir() . '/stub-documents.json');
     stubRecover();
 }
 
