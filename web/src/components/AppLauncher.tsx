@@ -12,7 +12,15 @@ import type { LauncherTile } from '../services/appLauncher'
 import { useLauncherTileIcon } from '../services/useLauncherTileIcon'
 
 const S: Record<string, CSSProperties> = {
-  wrap: { position: 'fixed', top: 16, left: 16, zIndex: 1000, display: 'inline-block' },
+  // Flows where it is placed. It used to be `position: fixed, top 16, left 16`
+  // from the scaffold, where this was a standalone launcher floating in the
+  // corner of an otherwise empty page. Every app now renders it inside the
+  // header's action row, so pinning it to the viewport tore it out of that row
+  // and dropped it on top of the brand -- "AICOUNTLY Billing" rendered as
+  // "NTLY Billing" with the icon sitting over the first six characters.
+  //
+  // relative, not static, because the panel below anchors to it.
+  wrap: { position: 'relative', zIndex: 1000, display: 'inline-block' },
   trigger: {
     display: 'inline-flex',
     alignItems: 'center',
@@ -27,7 +35,10 @@ const S: Record<string, CSSProperties> = {
   },
   panel: {
     position: 'absolute',
-    left: 0,
+    // Opens leftward from the button. It sits at the right end of the header in
+    // every app, and this panel is up to 448px wide -- left-aligning it would
+    // hang off the right edge of the window.
+    right: 0,
     top: '100%',
     marginTop: 8,
     zIndex: 1000,
