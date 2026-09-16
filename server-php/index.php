@@ -12,13 +12,13 @@ declare(strict_types=1);
  *   GET  /api/health          liveness + which environment answered
  *   POST /api/global/{path}   allow-listed relay to the portal auth API
  *   GET  /api/session         who the caller is, per the portal
- *
- * There is deliberately nothing else here yet.
+ *   *    /api/v1/...          the Sales API proper — see src/Routes.php
  */
 
 namespace Aicountly\Api;
 
 require __DIR__ . '/src/Env.php';
+require __DIR__ . '/src/Autoload.php';
 require __DIR__ . '/src/Portal.php';
 
 Env::load(__DIR__ . '/.env');
@@ -134,8 +134,8 @@ function apply_cors(): void
     }
 
     header('Access-Control-Allow-Origin: ' . $origin);
-    header('Access-Control-Allow-Headers: Authorization, Content-Type');
-    header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+    header('Access-Control-Allow-Headers: Authorization, Content-Type, Idempotency-Key, X-Source-App, X-Saas-Origin');
+    header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
     header('Access-Control-Max-Age: 600');
     header('Vary: Origin');
 }
@@ -219,6 +219,32 @@ if ($path === 'session') {
         'authenticated' => true,
         'uuid' => $session['uuid_aictly'] ?? ($session['uuid'] ?? ''),
     ]);
+}
+
+// ---------------------------------------------------------------------------
+// The Sales API
+//
+// Everything above this line is the auth bootstrap and predates the product.
+// Everything below is the product, and it all goes through one router so that
+// authentication, company scope and the tenant check happen in one place rather
+// than being remembered per endpoint.
+// ---------------------------------------------------------------------------
+
+$router = new Router();
+Routes::register($router);
+
+try {
+    if ($router->dispatch($method, $path)) {
+        exit;
+    }
+} catch (\PDOException $e) {
+    // A database problem is ours, not the caller's. The detail goes to the log;
+    // the caller gets something they can act on.
+    error_log('[sales] database error on ' . $path . ': ' . $e->getMessage());
+    Http::error(503, 'database_unavailable', 'The Sales database is not reachable right now. Please retry.');
+} catch (\Throwable $e) {
+    error_log('[sales] unhandled error on ' . $path . ': ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
+    Http::error(500, 'server_error', 'Something went wrong handling that request.');
 }
 
 send_json(404, ['message' => 'Not found.']);

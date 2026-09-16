@@ -19,7 +19,7 @@ import {
   resolveLoginPortalOrigin,
   resolveProductKeyFromHost,
 } from './hostnames'
-import { clearAllTokens, getAuthToken, getSesKey, saveSession } from './tokens'
+import { clearAllTokens, clearSession, getAuthToken, getSesKey, saveSession } from './tokens'
 import { getApiBaseUrl } from '../config'
 
 /** Portal convention for "come back here afterwards". */
@@ -311,9 +311,20 @@ let mintInFlight: Promise<string> | null = null
  * achieve. `/seskey/refresh` becomes worth wiring up when the app starts making
  * enough API calls for the extra round trip to matter.
  */
-export async function ensureSesKey(): Promise<string> {
-  const existing = getSesKey()
-  if (existing) return existing
+/**
+ * The current ses_key, minting one if there is none.
+ *
+ * `force` discards the stored key first. The API client uses it after a 401:
+ * a key can be revoked server-side before its local expiry, and re-minting is
+ * a far better answer than throwing the user back to the portal.
+ */
+export async function ensureSesKey(force = false): Promise<string> {
+  if (force) {
+    clearSession()
+  } else {
+    const existing = getSesKey()
+    if (existing) return existing
+  }
 
   if (!mintInFlight) {
     mintInFlight = requestSesKey('/seskey').finally(() => {
