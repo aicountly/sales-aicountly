@@ -288,7 +288,15 @@ jobs:
           # runtime on every request, unlike the web build. It must never be
           # uploaded and must never be deleted, hence the excludes below
           # combined with --delete.
+          #
+          # .env.example IS shipped, and the include has to come first because
+          # rsync takes the first matching rule. It is the file someone copies
+          # to api/.env, and telling them to copy a template that was never
+          # uploaded is an instruction nobody can follow. It holds placeholders
+          # only, and the .htaccess deployed beside it 404s every dotfile, so
+          # it is not readable over HTTP.
           rsync -avz --delete \
+            --include='.env.example' \
             --exclude='.env' \
             --exclude='.env.*' \
             --exclude='.git*' \
@@ -297,7 +305,7 @@ jobs:
             server-php/ "deploy-target:$REMOTE_ROOT/api/"
 
           echo "Deployed server-php to \$REMOTE_ROOT/api/"
-          echo "::notice::If this is the first API deploy, create api/.env on the server from server-php/.env.example — it is never uploaded."
+          echo "::notice::If this is the first API deploy, copy api/.env.example to api/.env on the server and fill it in. The template is deployed; the real .env is never uploaded and never deleted."
 
       # --------------------------------------------------------------------
       # Schema
@@ -381,7 +389,7 @@ jobs:
               exit 1
               ;;
             92)
-              echo "::error::api/.env does not exist on the server, so migrate.php has no database to connect to. Create it once by hand from server-php/.env.example -- it is deliberately never uploaded."
+              echo "::error::api/.env does not exist on the server, so migrate.php has no database to connect to. Copy api/.env.example to api/.env and fill it in -- the template sits right next to it; the real .env is never uploaded."
               exit 1
               ;;
             93)
