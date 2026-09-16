@@ -83,6 +83,11 @@ final class Context
             Http::forbidden('You do not have access to this company.');
         }
 
+        // This row is the only authoritative statement of what this person's
+        // access to this company IS, and we are holding it. Capturing it here
+        // is why CompanyAccess costs no extra call on the common path.
+        CompanyAccess::remember($this, $auth, is_array($company) ? $company : []);
+
         self::$verified[$key] = true;
     }
 

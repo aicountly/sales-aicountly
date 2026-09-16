@@ -17,8 +17,11 @@ namespace Aicountly\Api;
  * one curl away and the person who wants to see the margin they were not shown
  * is exactly the person who will try it.
  *
- * The company owner (portal acs_type = 1) holds everything, so a brand-new
- * company is usable before anyone has configured a single profile.
+ * The company owner holds everything, so a brand-new company is usable before
+ * anyone has configured a single profile. Who the owner is comes from the Manage
+ * company row via CompanyAccess — NOT from the portal session, which is not
+ * company-scoped and never carried it. Reading it from the session is what left
+ * every real user holding nothing at all.
  */
 final class Permissions
 {
@@ -76,9 +79,23 @@ final class Permissions
     /** Assert a permission, or answer 403 and stop. */
     public static function assert(Context $ctx, Auth $auth, string $permission): void
     {
-        if (!self::allows($ctx, $auth, $permission)) {
-            Http::forbidden('You do not have permission to ' . self::describe($permission) . '.');
+        if (self::allows($ctx, $auth, $permission)) {
+            return;
         }
+
+        // Somebody holding NOTHING has a different problem from somebody holding
+        // the wrong thing, and needs a different sentence. "You cannot view
+        // quotations" reads like a policy decision; it is usually just that
+        // nobody has set this person up yet, and saying which one it is saves
+        // them a support ticket.
+        if (self::granted($ctx, $auth) === []) {
+            Http::forbidden(
+                'You have not been given any Sales access yet. Ask the company owner to '
+                . 'assign you a permission profile in Settings → Access.',
+            );
+        }
+
+        Http::forbidden('You do not have permission to ' . self::describe($permission) . '.');
     }
 
     public static function allows(Context $ctx, Auth $auth, string $permission): bool
@@ -89,7 +106,7 @@ final class Permissions
         if ($auth->isService()) {
             return true;
         }
-        if ($auth->accessType() === 1) {
+        if (CompanyAccess::isOwner($ctx, $auth)) {
             return true;
         }
 
@@ -104,7 +121,7 @@ final class Permissions
             return self::$cache[$key];
         }
 
-        if ($auth->isService() || $auth->accessType() === 1) {
+        if ($auth->isService() || CompanyAccess::isOwner($ctx, $auth)) {
             return self::$cache[$key] = self::all();
         }
 
@@ -132,6 +149,12 @@ final class Permissions
         }
 
         return self::$cache[$key] = array_keys($granted);
+    }
+
+    /** Drop the per-request grant cache. The test suite resets between cases. */
+    public static function forget(): void
+    {
+        self::$cache = [];
     }
 
     /** @return list<string> */

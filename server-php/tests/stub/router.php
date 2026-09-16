@@ -72,9 +72,49 @@ if ($key !== '' && isset($seen[$key])) {
 
 $n = count($seen) + 1;
 
+// --- The auth portal ------------------------------------------------------
+// Only reachable when PORTAL_AUTH_BASE points here. Pointing it at the stub is
+// what lets a harness exercise the USER path — the one real users take —
+// instead of only the service-key path, where every permission check is
+// bypassed by design and therefore never actually tested.
+if (str_contains($path, '/validatesession')) {
+    echo json_encode([
+        'status'      => 1,
+        'uuid_aictly' => getenv('STUB_ACTOR_UUID') ?: 'user-owner',
+        'name'        => 'Stub Owner',
+    ]);
+    exit;
+}
+
 // --- Manage ---------------------------------------------------------------
+// Manage's read-only member directory: GET companies/{id}/share. The shape
+// mirrors CompanyAccessService::listShareDirectory(), including acs_type /
+// is_owner, because that is what Sales resolves ownership from.
+if (preg_match('#/companies/(\d+)/share$#', $path, $shareMatch) === 1) {
+    echo json_encode(['success' => '1', 'data' => [
+        ['uuid' => 'user-owner', 'platform_user_uuid' => 'user-owner', 'display_name' => 'Stub Owner',
+         'name' => 'Stub Owner', 'email' => 'owner@example.com', 'mobile' => null, 'is_owner' => true],
+        ['uuid' => 'user-member', 'platform_user_uuid' => 'user-member', 'display_name' => 'Stub Member',
+         'name' => 'Stub Member', 'email' => 'member@example.com', 'mobile' => null, 'is_owner' => false],
+    ]]);
+    exit;
+}
+
+if (str_contains($path, '/companies') && !str_contains($path, '/share')) {
+    // The switcher payload. acs_type is the field Sales resolves ownership
+    // from, and it lives HERE — on a company row — not in the portal session.
+    echo json_encode(['data' => [
+        ['comp_id' => (int) ($_GET['comp_id'] ?? 77), 'cmp_name' => 'Stub Trading Co', 'acs_type' => 1, 'ownership' => 'owner'],
+    ]]);
+    exit;
+}
+
 if (str_contains($path, '/companyinfo')) {
-    echo json_encode(['data' => ['cmp_id' => (int) ($_GET['comp_id'] ?? 0), 'cmp_name' => 'Stub Trading Co']]);
+    echo json_encode(['data' => [
+        'cmp_id'   => (int) ($_GET['comp_id'] ?? 0),
+        'cmp_name' => 'Stub Trading Co',
+        'acs_type' => 1,
+    ]]);
     exit;
 }
 

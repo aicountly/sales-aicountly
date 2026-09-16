@@ -22,6 +22,7 @@ require __DIR__ . '/../src/Autoload.php';
 
 Env::load(__DIR__ . '/../.env');
 
+use Aicountly\Api\Controllers\AccessController;
 use Aicountly\Api\Domain\CreditControlService;
 use Aicountly\Api\Domain\ForecastService;
 use Aicountly\Api\Domain\FulfilmentService;
@@ -122,9 +123,27 @@ function ownerAuth(): Auth
         'kind'      => 'user',
         'sourceApp' => 'sales',
         'sesKey'    => 'stub-ses-key',
-        // acs_type 1 = company owner, so Permissions grants everything and the
-        // tests exercise the domain rather than the permission table.
-        'session'   => ['acs_type' => 1, 'name' => 'Owner'],
+        'session'   => ['name' => 'Owner'],
+    ] as $prop => $value) {
+        $p = $r->getProperty($prop);
+        $p->setAccessible(true);
+        $p->setValue($auth, $value);
+    }
+
+    return $auth;
+}
+
+/** Somebody who has been given access to the company but does not own it. */
+function memberAuth(string $uuid = 'user-member'): Auth
+{
+    $r = new \ReflectionClass(Auth::class);
+    $auth = $r->newInstanceWithoutConstructor();
+    foreach ([
+        'uuid'      => $uuid,
+        'kind'      => 'user',
+        'sourceApp' => 'sales',
+        'sesKey'    => 'stub-ses-key-member',
+        'session'   => ['name' => 'Member'],
     ] as $prop => $value) {
         $p = $r->getProperty($prop);
         $p->setAccessible(true);
@@ -150,6 +169,8 @@ function resetDatabase(): void
     // TRUNCATE, not DELETE: the audit table's row-level triggers refuse DELETE,
     // and deliberately do not fire on TRUNCATE so a suite can reset itself.
     Db::connect()->exec('TRUNCATE ' . implode(', ', $tables) . ', sales_audit_log RESTART IDENTITY CASCADE');
+    // Grants are memoised per request; a suite is many requests in one process.
+    Permissions::forget();
     @unlink(sys_get_temp_dir() . '/stub-idempotency.json');
     @unlink(sys_get_temp_dir() . '/stub-requests.jsonl');
     @unlink(sys_get_temp_dir() . '/stub-documents.json');
@@ -220,6 +241,12 @@ function orderInput(array $overrides = []): array
 
 $ctx = freshContext();
 $auth = ownerAuth();
+
+// In production this comes off the Manage company row that Context::assertAllowed()
+// already fetched. Seeding it is the ONE thing these tests stand in for, and it is
+// seeded through the same door production writes to — not by handing Auth a fake
+// session field, which is how a suite ends up asserting its own mock.
+CompanyAccess::seed($ctx, $auth, CompanyAccess::OWNER);
 
 echo "\nQuotations\n";
 
@@ -1059,6 +1086,211 @@ check('a reorder suggestion needs a real rhythm, not two orders', function () us
 
     $candidates = (new MetricsService($ctx))->reorderCandidates('2026-09-16');
     assertSame(0, count($candidates), 'two orders is a line, not a pattern');
+});
+
+echo "\nPermissions\n";
+
+check('reads ownership off a Manage company row, in the same order the browser does', function () {
+    // These are the shapes /manage/companies actually answers with. The browser's
+    // resolveAcsType() has been audited against them; this is the server agreeing.
+    assertSame(CompanyAccess::OWNER, CompanyAccess::fromRow(['acs_type' => 1]), 'acs_type 1');
+    assertSame(CompanyAccess::MEMBER, CompanyAccess::fromRow(['acs_type' => 0]), 'acs_type 0');
+    assertSame(CompanyAccess::OWNER, CompanyAccess::fromRow(['acs_type' => '1']), 'acs_type as a string');
+    assertSame(CompanyAccess::OWNER, CompanyAccess::fromRow(['ownership' => 'Owner']), 'ownership label');
+    assertSame(CompanyAccess::MEMBER, CompanyAccess::fromRow(['ownership' => 'shared']), 'shared company');
+    assertSame(CompanyAccess::OWNER, CompanyAccess::fromRow(['is_creator' => true]), 'creator');
+
+    // acs_type wins over a contradicting label, because that is the precedence
+    // Manage's own mapper uses.
+    assertSame(CompanyAccess::MEMBER, CompanyAccess::fromRow(['acs_type' => 0, 'ownership' => 'owner']), 'acs_type wins');
+});
+
+check('a company Manage cannot describe is unknown, not owner', function () {
+    // The bug this whole class exists for was an access check that answered
+    // "not owner" for everyone. Its mirror image — answering "owner" when we do
+    // not know — would be worse, so it is pinned here.
+    assertSame(null, CompanyAccess::fromRow([]), 'empty row');
+    assertSame(null, CompanyAccess::fromRow(['ownership' => 'something new']), 'unrecognised label');
+    assertSame(null, CompanyAccess::fromRow(['acs_type' => 9]), 'out-of-range acs_type');
+});
+
+check('the company owner holds every permission without a profile being configured', function () use ($ctx, $auth) {
+    resetDatabase();
+    // No rows in sales_permission_profiles at all: this is a company on its first day.
+    assertTrue(Permissions::allows($ctx, $auth, 'quotation.view'), 'owner can view quotations');
+    assertTrue(Permissions::allows($ctx, $auth, 'access.manage'), 'owner can manage access');
+    assertSame(count(Permissions::all()), count(Permissions::granted($ctx, $auth)), 'owner holds the whole catalog');
+});
+
+check('a member with no profile holds nothing', function () use ($ctx) {
+    resetDatabase();
+    $member = memberAuth();
+    CompanyAccess::seed($ctx, $member, CompanyAccess::MEMBER);
+
+    assertSame([], Permissions::granted($ctx, $member), 'no grants');
+    assertTrue(!Permissions::allows($ctx, $member, 'quotation.view'), 'and cannot view quotations');
+});
+
+check('a member holds exactly what their profile grants', function () use ($ctx) {
+    resetDatabase();
+    $member = memberAuth();
+    CompanyAccess::seed($ctx, $member, CompanyAccess::MEMBER);
+
+    $profileId = Db::insert('sales_permission_profiles', [
+        'cmp_id'       => $ctx->cmpId,
+        'profile_name' => 'Sales executive',
+        'permissions'  => json_encode(['quotation.view', 'quotation.create']),
+    ], 'profile_id');
+    Db::insert('sales_permission_assignments', [
+        'cmp_id'     => $ctx->cmpId,
+        'user_uuid'  => $member->uuid,
+        'profile_id' => $profileId,
+    ], 'assignment_id');
+    Permissions::forget();
+
+    assertTrue(Permissions::allows($ctx, $member, 'quotation.view'), 'granted permission');
+    assertTrue(Permissions::allows($ctx, $member, 'quotation.create'), 'other granted permission');
+    assertTrue(!Permissions::allows($ctx, $member, 'margin.view'), 'margin is not in the profile');
+    assertTrue(!Permissions::allows($ctx, $member, 'order.cancel'), 'nor is cancelling an order');
+});
+
+check('a deactivated profile stops granting immediately', function () use ($ctx) {
+    resetDatabase();
+    $member = memberAuth();
+    CompanyAccess::seed($ctx, $member, CompanyAccess::MEMBER);
+
+    $profileId = Db::insert('sales_permission_profiles', [
+        'cmp_id'       => $ctx->cmpId,
+        'profile_name' => 'Temporary',
+        'permissions'  => json_encode(['quotation.view']),
+        'is_active'    => false,
+    ], 'profile_id');
+    Db::insert('sales_permission_assignments', [
+        'cmp_id'     => $ctx->cmpId,
+        'user_uuid'  => $member->uuid,
+        'profile_id' => $profileId,
+    ], 'assignment_id');
+    Permissions::forget();
+
+    assertTrue(!Permissions::allows($ctx, $member, 'quotation.view'), 'an inactive profile grants nothing');
+});
+
+check('a profile in another company does not grant anything here', function () use ($ctx) {
+    resetDatabase();
+    $member = memberAuth();
+    CompanyAccess::seed($ctx, $member, CompanyAccess::MEMBER);
+
+    $profileId = Db::insert('sales_permission_profiles', [
+        'cmp_id'       => $ctx->cmpId + 1,
+        'profile_name' => 'Elsewhere',
+        'permissions'  => json_encode(['quotation.view', 'margin.view']),
+    ], 'profile_id');
+    Db::insert('sales_permission_assignments', [
+        'cmp_id'     => $ctx->cmpId + 1,
+        'user_uuid'  => $member->uuid,
+        'profile_id' => $profileId,
+    ], 'assignment_id');
+    Permissions::forget();
+
+    assertSame([], Permissions::granted($ctx, $member), 'grants do not cross a company boundary');
+});
+
+check('a company not yet resolved is looked up rather than guessed', function () use ($ctx) {
+    resetDatabase();
+    CompanyAccess::forget();
+    $owner = memberAuth('user-owner');
+
+    // Nothing seeded: `companyinfo` did not carry the field, so CompanyAccess
+    // asks Manage's company list — the payload the switcher reads. The stub
+    // answers acs_type 1, and that is where ownership is supposed to come from.
+    assertSame(CompanyAccess::OWNER, CompanyAccess::accessType($ctx, $owner), 'resolved from the company list');
+    assertTrue(Permissions::allows($ctx, $owner, 'access.manage'), 'and grants accordingly');
+});
+
+check('when Manage cannot answer, nobody is an owner', function () use ($ctx) {
+    resetDatabase();
+    CompanyAccess::forget();
+    Permissions::forget();
+    $stranger = memberAuth('user-unreachable');
+
+    // This is the direction that matters. An access check that fails OPEN is
+    // not an access check, and "Manage had a bad minute" must never read as
+    // "this person owns the company".
+    stubFail('companies', 500);
+    try {
+        assertSame(null, CompanyAccess::accessType($ctx, $stranger), 'unknown, not owner');
+        assertTrue(!Permissions::allows($ctx, $stranger, 'quotation.view'), 'and grants nothing');
+        assertSame([], Permissions::granted($ctx, $stranger), 'falling through to the profile table, which is empty');
+    } finally {
+        stubRecover();
+        CompanyAccess::forget();
+    }
+});
+
+echo "\nAccess administration\n";
+
+/** Call one of AccessController's validators directly. Http throws under CLI. */
+function accessCall(string $method, array $args): mixed
+{
+    $r = new \ReflectionMethod(AccessController::class, $method);
+    $r->setAccessible(true);
+
+    return $r->invokeArgs(null, $args);
+}
+
+check('a profile can only carry permissions this product defines', function () {
+    // The allowlist is the point. An arbitrary string in that JSON array is a
+    // permission somebody believes is enforced and no assert will ever ask
+    // about — a grant that silently does nothing, or worse, reads as a denial.
+    $accepted = accessCall('permissions', [['quotation.view', 'margin.view', 'quotation.view']]);
+    sort($accepted);
+    assertSame(['margin.view', 'quotation.view'], $accepted, 'known codes, deduplicated');
+
+    assertThrows(
+        static fn () => accessCall('permissions', [['quotation.view', 'quotation.destroy_everything']]),
+        'does not define',
+        'unknown permission code',
+    );
+    assertThrows(
+        static fn () => accessCall('permissions', ['quotation.view']),
+        'list of permission codes',
+        'a string where a list belongs',
+    );
+});
+
+check('a profile needs a name, and the name is bounded', function () {
+    assertSame('Sales executive', accessCall('name', ['  Sales executive  ']), 'trimmed');
+    assertThrows(static fn () => accessCall('name', ['   ']), 'needs a name', 'blank name');
+    assertThrows(static fn () => accessCall('name', [str_repeat('x', 81)]), 'longer than 80', 'overlong name');
+});
+
+check('the screen agrees with the enforcement about an inactive profile', function () use ($ctx) {
+    resetDatabase();
+    // effective() is what the Access screen shows as "what they can do today".
+    // If it counted an inactive profile, the screen would promise access that
+    // Permissions::granted() refuses — and the administrator would believe the
+    // screen.
+    $liveId = (int) Db::insert('sales_permission_profiles', [
+        'cmp_id'       => $ctx->cmpId,
+        'profile_name' => 'Live',
+        'permissions'  => json_encode(['quotation.view']),
+    ], 'profile_id');
+    $deadId = (int) Db::insert('sales_permission_profiles', [
+        'cmp_id'       => $ctx->cmpId,
+        'profile_name' => 'Retired',
+        'permissions'  => json_encode(['margin.view']),
+        'is_active'    => false,
+    ], 'profile_id');
+
+    $effective = accessCall('effective', [[
+        ['profile_id' => $liveId, 'profile_name' => 'Live', 'is_active' => true],
+        ['profile_id' => $deadId, 'profile_name' => 'Retired', 'is_active' => false],
+    ]]);
+
+    assertSame(['quotation.view'], $effective, 'only the active profile counts');
+    assertSame([], accessCall('effective', [[
+        ['profile_id' => $deadId, 'profile_name' => 'Retired', 'is_active' => false],
+    ]]), 'nothing active grants nothing');
 });
 
 // ---------------------------------------------------------------------------

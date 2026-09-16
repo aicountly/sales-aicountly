@@ -107,12 +107,6 @@ final class Auth
         return substr(hash('sha256', $this->kind . '|' . $this->uuid . '|' . $this->sesKey), 0, 32);
     }
 
-    /** Portal access type for the company when the portal reported one: 1 = owner. */
-    public function accessType(): ?int
-    {
-        return isset($this->session['acs_type']) ? (int) $this->session['acs_type'] : null;
-    }
-
     public function displayName(): string
     {
         foreach (['name', 'full_name', 'user_name', 'email'] as $field) {

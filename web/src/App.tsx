@@ -24,6 +24,7 @@ import Approvals from './pages/Approvals'
 import PriceBooks from './pages/PriceBooks'
 import Territories from './pages/Territories'
 import Settings from './pages/Settings'
+import Access from './pages/Access'
 import { Notice } from './ui'
 import { initAnalytics, trackPageView } from './utils/analytics'
 import './App.css'
@@ -131,6 +132,7 @@ export default function App() {
             <Route path="price-books" element={scoped(<PriceBooks />)} />
             <Route path="territories" element={scoped(<Territories />)} />
             <Route path="settings" element={scoped(<Settings />)} />
+            <Route path="settings/access" element={scoped(<Access />)} />
             {/* The portal callback lands here once AuthProvider has consumed the token. */}
             <Route path="auth/callback" element={<Navigate to="/" replace />} />
             <Route path="*" element={<Notice tone="warning">That page does not exist.</Notice>} />

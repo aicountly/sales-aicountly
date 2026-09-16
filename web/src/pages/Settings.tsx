@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api, ApiError } from '../services/api'
 import type { SalesSettings } from '../services/types'
 import { useApi } from '../hooks/useApi'
@@ -49,6 +50,14 @@ export default function Settings() {
           <p>How this company numbers its documents and where its limits sit.</p>
         </div>
       </header>
+
+      {can('access.manage') && (
+        <Notice tone="info" title="Who can do what">
+          Sales permissions live in this app, not in Manage.{' '}
+          <Link to="/settings/access">Open Access</Link> to create permission profiles and give them
+          to the people Manage has let into this company.
+        </Notice>
+      )}
 
       {error && <Notice tone="danger" title="Could not save">{error}</Notice>}
       {saved && <Notice tone="success">Saved.</Notice>}

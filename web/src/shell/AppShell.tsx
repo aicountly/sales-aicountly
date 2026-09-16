@@ -13,6 +13,7 @@ import {
   PackageCheck,
   RotateCcw,
   Settings as SettingsIcon,
+  ShieldAlert,
   Target,
   Users,
 } from 'lucide-react'
@@ -47,7 +48,8 @@ const NAV = [
   { to: '/returns', label: 'Returns', icon: RotateCcw, permission: 'return.create' },
   { to: '/reports', label: 'Reports', icon: BarChart3, permission: 'reports.view' },
   { to: '/territories', label: 'Territories', icon: Map, permission: 'territory.manage' },
-  { to: '/settings', label: 'Settings', icon: SettingsIcon },
+  { to: '/settings', label: 'Settings', icon: SettingsIcon, exact: true },
+  { to: '/settings/access', label: 'Access', icon: ShieldAlert, permission: 'access.manage' },
 ] as const
 
 function initials(name: string | null | undefined): string {
@@ -61,11 +63,42 @@ function initials(name: string | null | undefined): string {
     .join('')
 }
 
+/**
+ * The screen for somebody who is signed in but has not been given anything.
+ *
+ * Without this, a user with no Sales profile saw a sidebar with two links and
+ * a page of refused panels, which reads as a broken app rather than as an
+ * administrative step nobody has taken yet. It names who can fix it, because
+ * the person seeing this screen cannot.
+ */
+function NoAccess() {
+  return (
+    <div className="sales-page">
+      <div className="sales-card" style={{ maxWidth: 560, margin: '3rem auto', textAlign: 'center' }}>
+        <div className="sales-card-body">
+          <ShieldAlert size={28} aria-hidden style={{ color: 'var(--warning, #b45309)' }} />
+          <h1 style={{ fontSize: '1.15rem', margin: '0.75rem 0 0.4rem' }}>You have no Sales access yet</h1>
+          <p style={{ color: 'var(--muted)', margin: 0, lineHeight: 1.6 }}>
+            Your sign-in worked and you can open this company, but nobody has given you a Sales
+            permission profile. Ask the company owner to add you under <strong>Settings → Access</strong>{' '}
+            in this app — Sales permissions are set here, not in Manage.
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function AppShell() {
   const { signOut } = useAuth()
   const { session, can } = useSales()
   const location = useLocation()
   const [navOpen, setNavOpen] = useState(false)
+
+  // Signed in, company confirmed, and holding nothing. Distinct from "still
+  // loading" (session is null) and from "owner" (holds everything), so it
+  // cannot flash up while the session request is in flight.
+  const lockedOut = session !== null && !session.is_owner && session.permissions.length === 0
 
   // Navigating closes the drawer. Leaving it open over the page somebody just
   // asked for is the classic mobile-nav bug.
@@ -226,7 +259,7 @@ export function AppShell() {
             list it links to cannot drift apart. `key` restarts scroll position
             on navigation, which a sticky header otherwise keeps halfway down. */}
         <main className="sales-ui" style={{ flex: 1, minWidth: 0 }} key={location.pathname}>
-          <Outlet />
+          {lockedOut ? <NoAccess /> : <Outlet />}
         </main>
       </div>
     </div>

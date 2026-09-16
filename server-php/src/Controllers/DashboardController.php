@@ -50,15 +50,25 @@ final class DashboardController extends Controller
     public static function overview(): void
     {
         [$auth, $ctx] = self::enter();
-        Permissions::assert($ctx, $auth, 'quotation.view');
+
+        // The Overview is the landing page, and it draws from three areas a
+        // person can be given separately. Refusing the WHOLE page because one of
+        // them is missing is how a warehouse clerk with order.view but no
+        // quotation.view ends up staring at an empty screen with no explanation.
+        // So: 403 only when there is nothing on this page they may see, and
+        // otherwise let each panel answer for itself.
+        self::requireAny($ctx, $auth, ['quotation.view', 'order.view', 'reports.view']);
+
+        $maySeeQuotations = Permissions::allows($ctx, $auth, 'quotation.view');
+        $maySeeOrders = Permissions::allows($ctx, $auth, 'order.view');
 
         [$from, $to, $asOf] = self::period();
         $metrics = new MetricsService($ctx);
         $currency = $metrics->reportingCurrency();
 
-        $pipeline = $metrics->openPipeline($asOf);
-        $orders = $metrics->orderCommitment($from, $to, $asOf);
-        $approvals = $metrics->pendingApprovalValue();
+        $pipeline = $maySeeQuotations ? $metrics->openPipeline($asOf) : null;
+        $orders = $maySeeOrders ? $metrics->orderCommitment($from, $to, $asOf) : null;
+        $approvals = $maySeeQuotations || $maySeeOrders ? $metrics->pendingApprovalValue() : null;
 
         // --- Books, live. Failure degrades these two cards only. ------------
         $maySeeFinancials = Permissions::allows($ctx, $auth, 'reports.view');
@@ -78,11 +88,15 @@ final class DashboardController extends Controller
         // how a chart ends up disagreeing with the card above it.
         $invoicedSeries = $maySeeFinancials ? $books->dailyInvoicedSeries($from, $to, $asOf) : ['status' => 'forbidden'];
         $usingInvoiced = ($invoicedSeries['status'] ?? '') === 'ready';
-        $series = $usingInvoiced ? $invoicedSeries['series'] : $metrics->dailyOrderTrend($from, $to, $asOf);
+        // Falling back to the order trend needs order.view. Without either, the
+        // chart says it has nothing to draw instead of drawing a flat line.
+        $series = $usingInvoiced
+            ? $invoicedSeries['series']
+            : ($maySeeOrders ? $metrics->dailyOrderTrend($from, $to, $asOf) : []);
 
         $achieved = $usingInvoiced
             ? ($invoiced['status'] === 'ready' ? $invoiced['value'] : null)
-            : $orders['confirmed_value'];
+            : ($orders['confirmed_value'] ?? null);
 
         Http::data([
             'view'     => 'overview',
@@ -98,22 +112,28 @@ final class DashboardController extends Controller
                         ? $invoiced['invoice_count'] . ' invoices in the period'
                         : null,
                 ]),
-                self::metric('confirmed_orders', 'Confirmed orders', 'ready', $orders['confirmed_value'], [
+                self::metric('confirmed_orders', 'Confirmed orders', $maySeeOrders ? 'ready' : 'forbidden', $orders['confirmed_value'] ?? null, [
                     'unit'       => 'currency',
                     'definition' => 'Value of orders confirmed with the customer, dated in the period. '
                         . 'A commitment, not revenue — Books recognises revenue when the invoice is posted.',
                     'source'     => 'sales',
-                    'comparison' => $orders['confirmed_count'] . ' orders',
-                    'drilldown'  => ['route' => 'orders', 'params' => ['from' => $from, 'to' => $to, 'committed' => 1]],
-                    'warning'    => $orders['currency_mixed'] ? 'More than one currency is in use; totals are not summed across currencies.' : null,
+                    'reason'     => $maySeeOrders ? null : 'You do not have permission to view sales orders.',
+                    'comparison' => $maySeeOrders ? $orders['confirmed_count'] . ' orders' : null,
+                    'drilldown'  => $maySeeOrders
+                        ? ['route' => 'orders', 'params' => ['from' => $from, 'to' => $to, 'committed' => 1]]
+                        : null,
+                    'warning'    => ($orders['currency_mixed'] ?? false) ? 'More than one currency is in use; totals are not summed across currencies.' : null,
                 ]),
-                self::metric('open_quotations', 'Open quotations', 'ready', $pipeline['value'], [
+                self::metric('open_quotations', 'Open quotations', $maySeeQuotations ? 'ready' : 'forbidden', $pipeline['value'] ?? null, [
                     'unit'       => 'currency',
                     'definition' => 'Latest revision of every quotation still open and inside its validity, as at '
                         . $asOf . '. Superseded revisions and lapsed quotations are excluded.',
                     'source'     => 'sales',
-                    'comparison' => $pipeline['count'] . ' open · ' . $pipeline['awaiting_response'] . ' awaiting a reply',
-                    'drilldown'  => ['route' => 'quotations', 'params' => ['open' => 1]],
+                    'reason'     => $maySeeQuotations ? null : 'You do not have permission to view quotations.',
+                    'comparison' => $maySeeQuotations
+                        ? $pipeline['count'] . ' open · ' . $pipeline['awaiting_response'] . ' awaiting a reply'
+                        : null,
+                    'drilldown'  => $maySeeQuotations ? ['route' => 'quotations', 'params' => ['open' => 1]] : null,
                 ]),
                 self::metric('overdue_receivables', 'Overdue receivables', $ageing['status'], $ageing['overdue'] ?? null, [
                     'unit'       => 'currency',
@@ -133,8 +153,11 @@ final class DashboardController extends Controller
                 'measure_label' => $usingInvoiced ? 'Invoiced sales' : 'Confirmed order value',
                 'basis'       => $usingInvoiced
                     ? 'Cumulative posted sales vouchers from Smart Books, to ' . $asOf . '.'
-                    : 'Cumulative confirmed order value from Sales, to ' . $asOf . '. '
-                        . 'Smart Books could not supply a dated invoice series, so this chart shows what Sales committed rather than what was billed.',
+                    : ($maySeeOrders
+                        ? 'Cumulative confirmed order value from Sales, to ' . $asOf . '. '
+                            . 'Smart Books could not supply a dated invoice series, so this chart shows what Sales committed rather than what was billed.'
+                        : 'Nothing to draw: this needs either Sales reporting or order visibility.'),
+                'status'      => $series === [] && !$usingInvoiced ? 'forbidden' : 'ready',
                 'series'      => $series,
                 'target'      => $target,
                 'achieved'    => $achieved,
@@ -142,8 +165,14 @@ final class DashboardController extends Controller
                 'period_end'  => $to,
             ],
             'priorities'  => self::priorities($metrics, $pipeline, $orders, $approvals, $asOf, $currency),
-            'attention'   => self::attentionRows($ctx, $auth, $metrics, $asOf),
-            'insights'    => (new InsightService($ctx, $metrics))->overview($asOf, ['currency' => $currency]),
+            'attention'   => $maySeeOrders
+                ? self::attentionRows($ctx, $auth, $metrics, $asOf)
+                : self::forbiddenPanel('You do not have permission to view sales orders.'),
+            // Suggestions are built from records; a person who cannot open the
+            // record must not be handed a card telling them to act on it.
+            'insights'    => $maySeeQuotations
+                ? (new InsightService($ctx, $metrics))->overview($asOf, ['currency' => $currency])
+                : [],
             'freshness'   => self::freshness([
                 'Quotations, orders and commitments' => 'Sales',
                 'Invoiced sales and receivables'     => 'Smart Books, live',
@@ -687,6 +716,40 @@ final class DashboardController extends Controller
         ];
     }
 
+    /**
+     * Refuse only when the caller may see NOTHING on this view.
+     *
+     * A view built from several areas of the product should not be all-or-
+     * nothing. This is the difference between "you cannot open the Overview"
+     * and "the quotations card on the Overview is not yours to see", and only
+     * the second one is true of somebody who holds order.view alone.
+     *
+     * @param list<string> $permissions
+     */
+    private static function requireAny(Context $ctx, \Aicountly\Api\Auth $auth, array $permissions): void
+    {
+        foreach ($permissions as $permission) {
+            if (Permissions::allows($ctx, $auth, $permission)) {
+                return;
+            }
+        }
+
+        Http::forbidden(
+            'You do not have permission to view this dashboard yet. '
+            . 'Ask the company owner to give you a Sales access profile in Settings → Access.',
+        );
+    }
+
+    /** A panel the caller may not see. Not empty — refused, and it says so. */
+    private static function forbiddenPanel(string $why): array
+    {
+        return [
+            'status' => 'forbidden',
+            'reason' => $why,
+            'rows'   => [],
+        ];
+    }
+
     /** @return array{status:string, value:null, reason:string, basis:string, source:string} */
     private static function forbiddenFigure(string $what): array
     {
@@ -719,15 +782,15 @@ final class DashboardController extends Controller
      */
     private static function priorities(
         MetricsService $metrics,
-        array $pipeline,
-        array $orders,
-        array $approvals,
+        ?array $pipeline,
+        ?array $orders,
+        ?array $approvals,
         string $asOf,
         string $currency,
     ): array {
         $out = [];
 
-        if ($pipeline['expiring_soon'] > 0) {
+        if ($pipeline !== null && $pipeline['expiring_soon'] > 0) {
             $out[] = [
                 'key'    => 'expiring',
                 'icon'   => 'quotation',
@@ -740,7 +803,7 @@ final class DashboardController extends Controller
             ];
         }
 
-        $awaitingStock = $metrics->awaitingStockConfirmation();
+        $awaitingStock = $orders === null ? 0 : $metrics->awaitingStockConfirmation();
         if ($awaitingStock > 0) {
             $out[] = [
                 'key'    => 'awaiting-stock',
@@ -753,7 +816,7 @@ final class DashboardController extends Controller
             ];
         }
 
-        if ($approvals['count'] > 0) {
+        if ($approvals !== null && $approvals['count'] > 0) {
             $out[] = [
                 'key'    => 'approvals',
                 'icon'   => 'approval',
@@ -765,7 +828,7 @@ final class DashboardController extends Controller
             ];
         }
 
-        if ($orders['at_risk_count'] > 0) {
+        if ($orders !== null && $orders['at_risk_count'] > 0) {
             $out[] = [
                 'key'    => 'delivery-risk',
                 'icon'   => 'risk',

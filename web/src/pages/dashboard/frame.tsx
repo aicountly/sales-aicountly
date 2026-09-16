@@ -543,5 +543,13 @@ export function MetricsSection({
   )
   const onOpen = useDrilldown()
 
-  return <MetricRow metrics={loading || !metrics ? placeholders : metrics} currency={currency} onOpen={onOpen} icons={icons} />
+  // A finished load with no metrics means the load FAILED, and the frame is
+  // already showing why. Falling back to the placeholders here left four cards
+  // reading "Loading…" for as long as the tab stayed open — a spinner that
+  // never resolves tells somebody the app is slow when it is actually refusing.
+  if (!loading && !metrics) {
+    return null
+  }
+
+  return <MetricRow metrics={loading ? placeholders : (metrics as Metric[])} currency={currency} onOpen={onOpen} icons={icons} />
 }

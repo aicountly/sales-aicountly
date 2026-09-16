@@ -64,4 +64,22 @@ final class ManageClient extends ApiClient
     {
         return $this->request('GET', 'companies' . self::query($filters), null, ['Authorization' => $this->authorization]);
     }
+
+    /**
+     * Who has access to this company, live, from Manage.
+     *
+     * Manage's read-only member directory — the same endpoint Books reads for
+     * identity enrichment. It answers from Manage's own tables and makes no
+     * outbound call of its own, which is why it is safe to read on a page load.
+     *
+     * Sales needs it to offer "give this person a Sales profile" as a list of
+     * real people rather than a box to paste a uuid into. NOTHING FROM IT IS
+     * STORED: the assignment row keeps the uuid and nothing else, so a person
+     * renamed in Manage is renamed here on the next read, and a person removed
+     * from the company stops appearing without Sales having to be told.
+     */
+    public function companyMembers(int $cmpId): array
+    {
+        return $this->request('GET', 'companies/' . $cmpId . '/share', null, ['Authorization' => $this->authorization]);
+    }
 }

@@ -102,6 +102,43 @@ is blocked on the other. See `books-react-app/docs/CROSS_SERVICE_CALL_RULES.md`.
 Every call has a **connect** bound as well as an overall one, because a product
 that is up but not accepting is held only by the connect timeout.
 
+## Who can do what
+
+Two products answer two different questions, and confusing them is what made
+this app unusable for its own owner for a while.
+
+**Manage answers WHO.** A person, their name and email, and which companies they
+may open. `acs_type` on a Manage company row says what that person's access to
+*that company* is — `1` is the owner. Sales reads it live and stores none of it
+(`CompanyAccess`, fed from the company row `Context::assertAllowed()` already
+fetches, falling back to Manage's company list).
+
+**Sales answers WHAT.** `sales_permission_profiles` is a named set of codes from
+`Permissions::CATALOG`; `sales_permission_assignments` ties a profile to a Manage
+uuid. That uuid is the only thing about a person stored in this database — no
+name, no email, no second user directory to drift out of step with the first.
+Settings → Access is the screen; `AccessController` is the API.
+
+The company owner holds the whole catalogue implicitly, so a company is usable
+on its first day before anyone has configured a profile. **Ownership is not
+assignable here** — granting it in Sales would be Sales overruling Manage on a
+question Manage owns.
+
+Two rules this has to keep:
+
+- **Unknown is not owner.** A company Manage cannot describe resolves to `null`,
+  and the check falls through to the profile table. An access check that fails
+  open is not an access check — `when Manage cannot answer, nobody is an owner`
+  in the suite pins the direction.
+- **A test must not assert its own mock.** The original suite handed `Auth` a
+  fake session containing `acs_type => 1`, so it stayed green while `acs_type`
+  was being read from the portal session — which is not company-scoped and has
+  never carried it. Every real user resolved to non-owner with zero permissions.
+  The fixtures now seed `CompanyAccess` through the same door production writes
+  to, and the stub answers `companies/{id}/share` and `validatesession` so the
+  harness can exercise the *user* path rather than only the service-key path,
+  where every permission check is bypassed by design.
+
 ## Degrading honestly
 
 When Books or Inventory cannot be reached:
@@ -111,6 +148,13 @@ When Books or Inventory cannot be reached:
   did not answer" and "no sales this month" are different facts, and a zero that
   means the first is a lie the user will act on;
 - a credit check that could not run reports `UNAVAILABLE`, never `ALLOW`.
+
+The same applies to permissions. A view built from several areas of the product
+refuses only when the caller may see *nothing* on it (`requireAny`), and each
+panel it cannot show says so — the Overview does not blank all five tabs because
+one card needed `quotation.view`. A finished load with no metrics renders the
+error, not the placeholders: a spinner that never resolves tells somebody the app
+is slow when it is actually refusing.
 
 ## The dashboards
 

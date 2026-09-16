@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Aicountly\Api;
 
+use Aicountly\Api\Controllers\AccessController;
 use Aicountly\Api\Controllers\CatalogController;
 use Aicountly\Api\Controllers\CustomersController;
 use Aicountly\Api\Controllers\DashboardController;
@@ -36,6 +37,18 @@ final class Routes
         $router->get('v1/permissions', [SettingsController::class, 'permissions']);
         $router->get('v1/settings', [SettingsController::class, 'show']);
         $router->put('v1/settings', [SettingsController::class, 'update']);
+
+        // Sales access administration. Profiles and assignments are OURS;
+        // the people are Manage's and are read live, never copied here.
+        $router->get('v1/access/profiles', [AccessController::class, 'profiles']);
+        $router->post('v1/access/profiles', [AccessController::class, 'createProfile']);
+        $router->put('v1/access/profiles/{id}', [AccessController::class, 'updateProfile']);
+        $router->delete('v1/access/profiles/{id}', [AccessController::class, 'deleteProfile']);
+        $router->get('v1/access/members', [AccessController::class, 'members']);
+        // PUT, not POST: the body is the WHOLE set of profiles this person
+        // holds, so the same request twice leaves the same state.
+        $router->put('v1/access/members/{uuid}', [AccessController::class, 'assign']);
+        $router->delete('v1/access/members/{uuid}', [AccessController::class, 'removeOrphan']);
 
         // Read-through to the products that own the data. These exist so the
         // browser makes one same-origin call instead of four cross-origin ones,

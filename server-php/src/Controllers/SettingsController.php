@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace Aicountly\Api\Controllers;
 
+use Aicountly\Api\Auth;
+use Aicountly\Api\Clients\ManageClient;
+use Aicountly\Api\CompanyAccess;
+use Aicountly\Api\Context;
 use Aicountly\Api\Db;
 use Aicountly\Api\Http;
 use Aicountly\Api\Permissions;
@@ -17,12 +21,58 @@ final class SettingsController extends Controller
 
         Http::data([
             'uuid'         => $auth->uuid,
-            'display_name' => $auth->displayName(),
+            'display_name' => self::displayName($ctx, $auth),
             'kind'         => $auth->kind,
-            'is_owner'     => $auth->accessType() === 1,
+            'is_owner'     => CompanyAccess::isOwner($ctx, $auth),
             'context'      => $ctx->asQuery(),
             'permissions'  => Permissions::granted($ctx, $auth),
         ]);
+    }
+
+    /**
+     * The caller's name, from whoever actually knows it.
+     *
+     * The portal's `validatesession` answer identifies the session; it does not
+     * reliably carry a name, and `Auth::displayName()` therefore fell through to
+     * the raw uuid — which is why the header was showing a bare number where a
+     * person's name belongs.
+     *
+     * Manage's member directory does carry it, this endpoint is called once per
+     * company (not per screen), and the value is used and discarded. A name
+     * cached in a Sales table would be the wrong name the first time somebody
+     * corrected theirs in Manage.
+     */
+    private static function displayName(Context $ctx, Auth $auth): string
+    {
+        $fallback = $auth->displayName();
+        if ($auth->isService()) {
+            return $fallback;
+        }
+
+        $result = (new ManageClient())->withSession($auth->sesKey())->companyMembers($ctx->cmpId);
+        if (!($result['ok'] ?? false)) {
+            return $fallback;
+        }
+
+        $body = $result['body'] ?? [];
+        $rows = is_array($body['data'] ?? null) ? $body['data'] : (is_array($body) ? $body : []);
+
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $uuid = (string) ($row['uuid'] ?? $row['platform_user_uuid'] ?? '');
+            if ($uuid !== $auth->uuid) {
+                continue;
+            }
+            foreach ([$row['display_name'] ?? null, $row['name'] ?? null, $row['email'] ?? null] as $candidate) {
+                if (is_string($candidate) && trim($candidate) !== '') {
+                    return trim($candidate);
+                }
+            }
+        }
+
+        return $fallback;
     }
 
     public static function permissions(): void
