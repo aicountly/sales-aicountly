@@ -165,11 +165,22 @@ if ($mountPoint !== '' && $mountPoint !== '/' && strpos($uri, $mountPoint) === 0
 $path = normalise_path($uri);
 
 if ($path === '' || $path === 'health') {
+    // Liveness AND readiness. 'status' stays ok whenever PHP is serving, so
+    // an uptime monitor pointed here keeps behaving as it always has; the
+    // database block is what tells you whether the app can actually be used.
+    // Reporting only the former is how a deploy went green on an app whose
+    // every real endpoint answered 503.
+    $database = Health::database();
+
     send_json(200, [
         'status' => 'ok',
         'app' => 'Sales',
         'env' => Env::get('APP_ENV', 'unknown'),
         'time' => gmdate('c'),
+        'database' => $database,
+        // One field to read when something is wrong. False means the site
+        // is up and the product is not usable.
+        'usable' => $database['reachable'] && ($database['schema']['ready'] ?? false),
     ]);
 }
 
