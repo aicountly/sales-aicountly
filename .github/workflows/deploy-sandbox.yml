@@ -299,6 +299,105 @@ jobs:
           echo "Deployed server-php to \$REMOTE_ROOT/api/"
           echo "::notice::If this is the first API deploy, create api/.env on the server from server-php/.env.example — it is never uploaded."
 
+      # --------------------------------------------------------------------
+      # Schema
+      #
+      # Applies pending migrations ON THE SERVER, against the database that
+      # api/.env points at, using the migration files the previous step just
+      # uploaded. It runs on every deploy rather than being remembered, because
+      # it is a no-op when nothing is pending -- "Up to date." and exit 0.
+      #
+      # migrate.php runs each file in its own transaction and records it by
+      # name and checksum, so a half-applied migration cannot exist and a
+      # second run cannot double-apply one. Editing a file that has already
+      # been applied is refused (exit 2) rather than silently ignored.
+      #
+      # This step FAILS THE DEPLOY. New code against an old schema is a broken
+      # app that still answers 200 on /health, which is the most confusing
+      # possible outcome; better to go red here.
+      # --------------------------------------------------------------------
+      - name: Run database migrations
+        env:
+          REMOTE_ROOT: ${{ secrets.SANDBOX_SSH_REMOTE_ROOT }}
+          PHP_BIN: ${{ secrets.SANDBOX_PHP_BIN }}
+        run: |
+          rc=0
+          ssh deploy-target "REMOTE_ROOT='$REMOTE_ROOT' PHP_BIN='${PHP_BIN:-}' bash -s" <<'REMOTE' || rc=$?
+          set -u
+
+          cd "$REMOTE_ROOT/api" 2>/dev/null || exit 91
+          [ -f .env ] || exit 92
+
+          # cPanel hosts carry several PHP builds and the one on PATH is often
+          # the oldest. This app needs 8.1+ (readonly properties) and pdo_pgsql,
+          # so a candidate is accepted only if it has both -- otherwise the
+          # first migration dies on a parse error or "could not find driver".
+          php_ok() {
+            [ -x "$1" ] || return 1
+            v=$("$1" -r 'echo PHP_VERSION_ID;' 2>/dev/null) || return 1
+            case "$v" in ''|*[!0-9]*) return 1 ;; esac
+            [ "$v" -ge 80100 ] || return 1
+            "$1" -m 2>/dev/null | grep -qix 'pdo_pgsql' || return 1
+          }
+
+          PHP=""
+          if [ -n "${PHP_BIN:-}" ]; then
+            php_ok "$PHP_BIN" || exit 93
+            PHP="$PHP_BIN"
+          else
+            for c in /opt/cpanel/ea-php84/root/usr/bin/php \
+                     /opt/cpanel/ea-php83/root/usr/bin/php \
+                     /opt/cpanel/ea-php82/root/usr/bin/php \
+                     /opt/cpanel/ea-php81/root/usr/bin/php \
+                     /usr/local/bin/php /usr/bin/php; do
+              if php_ok "$c"; then PHP="$c"; break; fi
+            done
+            if [ -z "$PHP" ]; then
+              p=$(command -v php 2>/dev/null) || true
+              if [ -n "$p" ] && php_ok "$p"; then PHP="$p"; fi
+            fi
+          fi
+          [ -n "$PHP" ] || exit 94
+
+          echo "Using $PHP ($("$PHP" -r 'echo PHP_VERSION;'))"
+          echo ""
+
+          # Listed first so the log says what is about to change, then applied.
+          "$PHP" bin/migrate.php --status || true
+          echo ""
+          "$PHP" bin/migrate.php
+          REMOTE
+
+          case "$rc" in
+            0)
+              echo "Schema is up to date."
+              ;;
+            2)
+              echo "::error::A migration that has already been applied has been edited since. migrate.php refuses to re-apply it, because the file and the database now disagree. Add a new migration instead of changing an applied one."
+              exit 1
+              ;;
+            91)
+              echo "::error::No api/ directory under SANDBOX_SSH_REMOTE_ROOT on the server. The previous step should have created it -- check the rsync output above."
+              exit 1
+              ;;
+            92)
+              echo "::error::api/.env does not exist on the server, so migrate.php has no database to connect to. Create it once by hand from server-php/.env.example -- it is deliberately never uploaded."
+              exit 1
+              ;;
+            93)
+              echo "::error::SANDBOX_PHP_BIN does not point at a usable PHP. It needs to be 8.1 or newer and have the pdo_pgsql extension."
+              exit 1
+              ;;
+            94)
+              echo "::error::Found no PHP 8.1+ with pdo_pgsql on the server. Set the SANDBOX_PHP_BIN secret to the full path of one, e.g. /opt/cpanel/ea-php84/root/usr/bin/php."
+              exit 1
+              ;;
+            *)
+              echo "::error::Migrations failed (exit $rc). The failing file and its error are in the output above; nothing from that file was applied."
+              exit 1
+              ;;
+          esac
+
       # A deployed API that cannot answer is worth knowing about now rather
       # than from the app's login screen. /health needs no credentials.
       - name: Smoke-test the deployed API

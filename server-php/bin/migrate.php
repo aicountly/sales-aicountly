@@ -71,7 +71,10 @@ foreach ($files as $path) {
             fwrite(STDERR, "CHANGED  {$name} — already applied, but the file has been edited since.\n");
             $drift++;
         } elseif ($status) {
-            echo "applied  {$name}\n";
+            // "already", not "applied": in apply mode that same word means
+            // "just applied it now". A deploy log is read by someone who
+            // needs to know which of those two happened.
+            echo "already  {$name}\n";
         }
         continue;
     }
