@@ -46,9 +46,12 @@ export default function PriceBooks() {
   }
 
   return (
-    <div style={{ display: 'grid', gap: '1rem' }}>
-      <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <h1 style={{ margin: 0, fontSize: '1.3rem' }}>Price books</h1>
+    <div className="sales-stack">
+      <header className="sales-page-header">
+        <div>
+          <h1>Price books</h1>
+          <p>What we charge, and the floor a discount may not cross.</p>
+        </div>
         {can('pricebook.manage') && <Button tone="primary" onClick={() => setCreating(true)}>New price book</Button>}
       </header>
 

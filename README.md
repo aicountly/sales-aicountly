@@ -10,16 +10,30 @@ with a small PHP API alongside it. Both halves deploy to cPanel.
 
 ## What this app does today
 
-Login → Dashboard. The dashboard shows a welcome message and a **Log out**
-button, and nothing else. No navigation, no modules, no placeholder cards —
-those arrive with the product.
+The commercial sales workflow: quotations and their revisions, pricing and
+discount approvals, sales orders, fulfilment coordination with Inventory,
+invoicing through Books, returns, targets, and five dashboards over the lot.
+
+| Screen | What it answers |
+| --- | --- |
+| Dashboard → Overview | What has been invoiced, what is committed, what needs doing first |
+| Dashboard → Pipeline & Quotations | Every open quotation and its next action |
+| Dashboard → Orders & Fulfilment | What we promised, what is available, what is late |
+| Dashboard → Customers & Collections | Who buys, who stopped, who owes us money |
+| Dashboard → Performance & Forecast | Target, actual, a rule-based projection and a what-if |
+| Quotations / Orders / Returns | The documents themselves, with their history |
+| Customers | The Sales view of a party, joined live to Books' position |
+| Pricing / Approvals / Targets / Territories | The policies those documents are judged against |
+| Reports | CSV exports under the same filters and permissions as the screen |
 
 Signing in is the AICOUNTLY portal's job, the same as every other AICOUNTLY
 SaaS: the app redirects to the portal, the portal returns an `auth_token`, and
 the app exchanges it for a short-lived session key. A user who is already signed
 in to another AICOUNTLY product lands straight on the dashboard.
 
-See [docs/auth/AICOUNTLY_AUTH_WORKFLOW.md](docs/auth/AICOUNTLY_AUTH_WORKFLOW.md).
+See [docs/auth/AICOUNTLY_AUTH_WORKFLOW.md](docs/auth/AICOUNTLY_AUTH_WORKFLOW.md)
+and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the second one is short and
+explains the single rule the whole product is built on.
 
 ## Layout
 
@@ -52,6 +66,7 @@ same-origin.
 | `npm run dev` | Vite dev server on http://localhost:5173 |
 | `npm run build` | Type-check, then build to `web/dist/` |
 | `npm run typecheck` | Type-check only |
+| `npm run test` | Unit tests (Vitest) |
 | `npm run preview` | Serve the production build locally |
 
 The PHP API has no build step and no dependencies. To run it locally:
@@ -60,6 +75,14 @@ The PHP API has no build step and no dependencies. To run it locally:
 cd server-php
 cp .env.example .env      # set APP_ENV=local
 php -S localhost:8000
+```
+
+Its test suite runs against a real PostgreSQL and a stub standing in for Books
+and Inventory, so what is exercised is the actual SQL and the actual idempotency
+behaviour rather than mocks of them:
+
+```bash
+server-php/tests/run.sh
 ```
 
 ## Environment variables

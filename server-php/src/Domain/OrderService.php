@@ -55,6 +55,19 @@ final class OrderService
             Http::validationFailed('An order needs at least one line.', ['field' => 'lines']);
         }
 
+        // Conversion is checked BEFORE the transaction opens so a double click,
+        // a retried POST or two people on the same quotation get the order that
+        // already exists rather than a second commitment for the same goods.
+        // Without this the only thing standing between a customer and two
+        // deliveries was how fast the page came back.
+        if (($quotationId = self::id($input['quotation_id'] ?? null)) !== null) {
+            $existing = $this->orderForQuotation($quotationId);
+            if ($existing !== null) {
+                return $existing;
+            }
+            $this->assertConvertible($quotationId);
+        }
+
         return Db::transaction(function () use ($input, $customerAccountId, $lines) {
             $orderNo = NumberSeries::next($this->ctx, 'order');
             $totals = QuotationService::totals($lines);
@@ -99,19 +112,73 @@ final class OrderService
             $this->writeLines($orderId, $lines);
 
             if (($quotationId = self::id($input['quotation_id'] ?? null)) !== null) {
-                Db::update('sales_quotations', ['status' => 'CONVERTED', 'updated_at' => self::now()], [
-                    'quotation_id' => $quotationId,
-                    'cmp_id'       => $this->ctx->cmpId,
-                ]);
+                // Inside the same transaction as the order, and guarded on the
+                // status we checked: if another request converted this quotation
+                // between the check and here, this updates nothing and the
+                // unique index on (cmp_id, quotation_id) refuses the order.
+                $converted = Db::run(
+                    "UPDATE sales_quotations
+                        SET status = 'CONVERTED', decided_at = COALESCE(decided_at, :now), updated_at = :now
+                      WHERE quotation_id = :id AND cmp_id = :cmp AND status <> 'CONVERTED'",
+                    ['id' => $quotationId, 'cmp' => $this->ctx->cmpId, 'now' => self::now()],
+                )->rowCount();
+
+                if ($converted === 0) {
+                    Http::conflict('That quotation has already been converted into an order.');
+                }
             }
 
             Audit::record($this->ctx, $this->auth, 'order.created', 'order', $orderId, null, [
                 'order_no'     => $orderNo,
                 'total_amount' => $totals['total'],
+                'quotation_id' => self::id($input['quotation_id'] ?? null),
             ]);
 
             return $this->find($orderId);
         });
+    }
+
+    /**
+     * The order this quotation already became, if it became one.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function orderForQuotation(int $quotationId): ?array
+    {
+        $orderId = Db::scalar(
+            "SELECT order_id FROM sales_orders
+              WHERE cmp_id = :cmp AND quotation_id = :q AND status <> 'CANCELLED'
+              ORDER BY order_id LIMIT 1",
+            ['cmp' => $this->ctx->cmpId, 'q' => $quotationId],
+        );
+
+        return $orderId === null ? null : $this->find((int) $orderId);
+    }
+
+    /**
+     * Refuse to convert a quotation that is not in a state to be converted.
+     *
+     * A cancelled or superseded quotation is not an agreement, and an order
+     * raised from one commits the company to terms the customer never saw.
+     */
+    private function assertConvertible(int $quotationId): void
+    {
+        $quotation = Db::first(
+            'SELECT quotation_id, status, valid_until, expired_at,
+                    EXISTS (SELECT 1 FROM sales_quotations s WHERE s.supersedes_id = q.quotation_id) AS superseded
+               FROM sales_quotations q WHERE quotation_id = :id AND cmp_id = :cmp',
+            ['id' => $quotationId, 'cmp' => $this->ctx->cmpId],
+        );
+
+        if ($quotation === null) {
+            Http::notFound('That quotation does not exist.');
+        }
+        if (!empty($quotation['superseded'])) {
+            Http::conflict('That quotation has been revised. Convert the latest revision instead.');
+        }
+        if (in_array($quotation['status'], ['CANCELLED', 'REJECTED'], true)) {
+            Http::conflict('A ' . strtolower((string) $quotation['status']) . ' quotation cannot become an order.');
+        }
     }
 
     /**
@@ -377,8 +444,115 @@ final class OrderService
         $row['commands'] = IntegrationCommand::forEntity($this->ctx, 'order', $orderId);
         $row['fulfilments'] = Db::all('SELECT * FROM sales_fulfilment_requests WHERE order_id = :id ORDER BY request_id DESC', ['id' => $orderId]);
         $row['invoice_requests'] = Db::all('SELECT * FROM sales_invoice_requests WHERE order_id = :id ORDER BY request_id DESC', ['id' => $orderId]);
+        $row['approvals'] = Db::all(
+            "SELECT * FROM sales_approval_requests
+              WHERE cmp_id = :cmp AND entity_type = 'order' AND entity_id = :id ORDER BY approval_id",
+            ['cmp' => $this->ctx->cmpId, 'id' => $orderId],
+        );
+        $row['facets'] = self::facets($row);
 
         return $row;
+    }
+
+    /**
+     * The five things "status" was being asked to mean at once.
+     *
+     * A single badge reading COMPLETED told a user nothing about whether the
+     * goods had gone, whether the invoice existed or whether the customer had
+     * paid — and different people read it as each of those. They are separate
+     * questions with separate answers, so they get separate answers.
+     *
+     *   approval     is this order agreed internally?
+     *   stock        has Inventory held what we promised?
+     *   fulfilment   how much of it has actually left?
+     *   invoice      has Books billed it?
+     *   payment      is there anything outstanding? — DEFERRED, because the
+     *                answer is Books' and this product must not guess it
+     *
+     * @param array<string, mixed> $order
+     * @return array<string, array{state:string, label:string, tone:string, detail:string|null}>
+     */
+    public static function facets(array $order): array
+    {
+        $lines = $order['lines'] ?? [];
+        $ordered = 0.0;
+        $delivered = 0.0;
+        $invoiced = 0.0;
+        $reserved = 0;
+        $stockLines = 0;
+
+        foreach ($lines as $line) {
+            $ordered += (float) $line['ordered_qty'];
+            $delivered += (float) $line['delivered_qty'];
+            $invoiced += (float) $line['invoiced_qty'];
+            if (empty($line['is_service'])) {
+                $stockLines++;
+                if (!empty($line['inventory_reservation_uuid'])) {
+                    $reserved++;
+                }
+            }
+        }
+
+        $status = (string) $order['status'];
+        $pendingApproval = false;
+        foreach ($order['approvals'] ?? [] as $approval) {
+            if (($approval['status'] ?? '') === 'PENDING') {
+                $pendingApproval = true;
+                break;
+            }
+        }
+
+        $postedInvoices = 0;
+        $failedInvoices = 0;
+        foreach ($order['invoice_requests'] ?? [] as $request) {
+            if (($request['status'] ?? '') === 'POSTED') {
+                $postedInvoices++;
+            } elseif (($request['status'] ?? '') === 'FAILED') {
+                $failedInvoices++;
+            }
+        }
+
+        return [
+            'approval' => match (true) {
+                $status === 'CANCELLED' => ['state' => 'cancelled', 'label' => 'Cancelled', 'tone' => 'neutral', 'detail' => $order['cancel_reason'] ?? null],
+                $pendingApproval        => ['state' => 'pending', 'label' => 'Awaiting approval', 'tone' => 'warning', 'detail' => null],
+                $status === 'DRAFT'     => ['state' => 'draft', 'label' => 'Draft', 'tone' => 'neutral', 'detail' => 'Not yet committed to the customer'],
+                default                 => ['state' => 'confirmed', 'label' => 'Confirmed', 'tone' => 'success',
+                    'detail' => $order['credit_decision'] === 'WARN' ? 'Confirmed past a credit warning' : null],
+            },
+            'stock' => match (true) {
+                $stockLines === 0        => ['state' => 'not_applicable', 'label' => 'No stock lines', 'tone' => 'neutral', 'detail' => 'Services only'],
+                $status === 'RESERVATION_PENDING' => ['state' => 'pending', 'label' => 'Reservation requested', 'tone' => 'warning', 'detail' => 'Waiting on Inventory'],
+                $reserved === 0          => ['state' => 'none', 'label' => 'Not reserved', 'tone' => 'neutral', 'detail' => null],
+                $reserved < $stockLines  => ['state' => 'partial', 'label' => 'Partly reserved', 'tone' => 'warning', 'detail' => $reserved . ' of ' . $stockLines . ' lines'],
+                default                  => ['state' => 'reserved', 'label' => 'Reserved', 'tone' => 'success', 'detail' => 'All stock lines held'],
+            },
+            'fulfilment' => match (true) {
+                $ordered <= 0            => ['state' => 'none', 'label' => 'Nothing ordered', 'tone' => 'neutral', 'detail' => null],
+                $delivered <= 0          => ['state' => 'none', 'label' => 'Not dispatched', 'tone' => 'neutral', 'detail' => null],
+                $delivered < $ordered    => ['state' => 'partial', 'label' => 'Part delivered', 'tone' => 'warning',
+                    'detail' => self::share($delivered, $ordered) . ' of the ordered quantity'],
+                default                  => ['state' => 'complete', 'label' => 'Delivered', 'tone' => 'success', 'detail' => 'In full'],
+            },
+            'invoice' => match (true) {
+                $failedInvoices > 0      => ['state' => 'failed', 'label' => 'Invoice request failed', 'tone' => 'danger', 'detail' => 'Retry from the order'],
+                $invoiced <= 0           => ['state' => 'none', 'label' => 'Not invoiced', 'tone' => 'neutral', 'detail' => null],
+                $invoiced < $ordered     => ['state' => 'partial', 'label' => 'Part invoiced', 'tone' => 'warning',
+                    'detail' => self::share($invoiced, $ordered) . ' billed'],
+                default                  => ['state' => 'complete', 'label' => 'Invoiced', 'tone' => 'success',
+                    'detail' => $postedInvoices . ' invoice' . ($postedInvoices === 1 ? '' : 's') . ' in Books'],
+            },
+            // Deliberately not answered here. Whether the customer has paid is
+            // Books' answer; a payment state guessed from our own invoice
+            // requests would say "paid" about money nobody has received.
+            'payment' => ['state' => 'ask_books', 'label' => 'See Smart Books', 'tone' => 'neutral',
+                'detail' => 'Payment status belongs to the accounts and is read live'],
+        ];
+    }
+
+    private static function share(float $part, float $whole): string
+    {
+        return $whole <= 0 ? '0%' : round($part / $whole * 100) . '%';
     }
 
     /**
@@ -416,15 +590,50 @@ final class OrderService
             $params['term'] = '%' . $filters['q'] . '%';
         }
         if (!empty($filters['open_only'])) {
-            $where[] = "o.status NOT IN ('CANCELLED', 'CLOSED', 'FULFILLED')";
+            $where[] = MetricsService::orderOpen();
+        }
+        // The predicate behind the "Confirmed orders" KPI, so its drilldown
+        // returns exactly what the card counted.
+        if (!empty($filters['committed'])) {
+            $where[] = MetricsService::orderCommitted();
+        }
+        if (!empty($filters['late'])) {
+            $where[] = MetricsService::orderOpen() . ' AND o.committed_date IS NOT NULL AND o.committed_date < :as_of::date';
+            $params['as_of'] = (string) ($filters['as_of'] ?? gmdate('Y-m-d'));
         }
 
         $clause = implode(' AND ', $where);
         $sortable = ['order_date', 'order_no', 'total_amount', 'status', 'committed_date', 'created_at'];
         $sortColumn = in_array($sort, $sortable, true) ? $sort : 'order_date';
 
+        // Progress comes back with the row. Without it the list can only show
+        // the single status column, which is the thing that was conflating five
+        // different questions in the first place.
+        $rows = Db::all(
+            "SELECT o.*,
+                    (SELECT COUNT(*) FROM sales_order_lines l WHERE l.order_id = o.order_id) AS line_count,
+                    (SELECT COUNT(*) FROM sales_order_lines l
+                      WHERE l.order_id = o.order_id AND l.is_service = FALSE) AS stock_line_count,
+                    (SELECT COUNT(*) FROM sales_order_lines l
+                      WHERE l.order_id = o.order_id AND l.inventory_reservation_uuid IS NOT NULL) AS reserved_lines,
+                    (SELECT COALESCE(SUM(l.ordered_qty), 0) FROM sales_order_lines l WHERE l.order_id = o.order_id) AS ordered_qty,
+                    (SELECT COALESCE(SUM(l.delivered_qty), 0) FROM sales_order_lines l WHERE l.order_id = o.order_id) AS delivered_qty,
+                    (SELECT COALESCE(SUM(l.invoiced_qty), 0) FROM sales_order_lines l WHERE l.order_id = o.order_id) AS invoiced_qty,
+                    (SELECT COUNT(*) FROM sales_integration_commands c
+                      WHERE c.cmp_id = o.cmp_id AND c.entity_type = 'order' AND c.entity_id = o.order_id
+                        AND c.status IN ('FAILED', 'BLOCKED')) AS stuck_commands,
+                    (SELECT COUNT(*) FROM sales_approval_requests a
+                      WHERE a.cmp_id = o.cmp_id AND a.entity_type = 'order' AND a.entity_id = o.order_id
+                        AND a.status = 'PENDING') AS pending_approvals
+               FROM sales_orders o
+              WHERE {$clause}
+              ORDER BY o.{$sortColumn} {$order} NULLS LAST, o.order_id {$order}
+              LIMIT {$limit} OFFSET {$offset}",
+            $params,
+        );
+
         return [
-            'rows'  => Db::all("SELECT o.* FROM sales_orders o WHERE {$clause} ORDER BY o.{$sortColumn} {$order}, o.order_id {$order} LIMIT {$limit} OFFSET {$offset}", $params),
+            'rows'  => $rows,
             'total' => (int) Db::scalar("SELECT COUNT(*) FROM sales_orders o WHERE {$clause}", $params),
         ];
     }

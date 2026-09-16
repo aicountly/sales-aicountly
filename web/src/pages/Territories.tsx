@@ -34,8 +34,13 @@ export default function Territories() {
   const editable = can('territory.manage')
 
   return (
-    <div style={{ display: 'grid', gap: '1rem' }}>
-      <h1 style={{ margin: 0, fontSize: '1.3rem' }}>Territories, channels and sales people</h1>
+    <div className="sales-stack">
+      <header className="sales-page-header">
+        <div>
+          <h1>Territories, channels and sales people</h1>
+          <p>Who covers what, and how far each of them may discount.</p>
+        </div>
+      </header>
 
       <Notice tone="info">
         A salesperson here is a portal user with a Sales role. Their name and login stay with the portal — what this

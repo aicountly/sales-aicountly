@@ -4,12 +4,21 @@ import { useAuth } from './auth/AuthProvider'
 import { SalesProvider, useSales } from './context/SalesContext'
 import { AppShell } from './shell/AppShell'
 import SignIn from './pages/SignIn'
-import SalesDashboard from './pages/SalesDashboard'
+import OverviewDashboard from './pages/dashboard/Overview'
+import PipelineDashboard from './pages/dashboard/Pipeline'
+import FulfilmentDashboard from './pages/dashboard/Fulfilment'
+import CollectionsDashboard from './pages/dashboard/Collections'
+import ForecastDashboard from './pages/dashboard/Forecast'
 import Quotations from './pages/Quotations'
 import QuotationDetail from './pages/QuotationDetail'
 import QuotationEditor from './pages/QuotationEditor'
 import Orders from './pages/Orders'
 import OrderDetail from './pages/OrderDetail'
+import OrderEditor from './pages/OrderEditor'
+import Customers from './pages/Customers'
+import CustomerDetail from './pages/CustomerDetail'
+import Targets from './pages/Targets'
+import Reports from './pages/Reports'
 import { ReturnDetail, ReturnsList } from './pages/Returns'
 import Approvals from './pages/Approvals'
 import PriceBooks from './pages/PriceBooks'
@@ -58,6 +67,11 @@ function RequireScope({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+/** Every route is scoped; wrapping once here beats remembering to do it twelve times. */
+function scoped(element: React.ReactNode) {
+  return <RequireScope>{element}</RequireScope>
+}
+
 export default function App() {
   const { status } = useAuth()
 
@@ -79,32 +93,44 @@ export default function App() {
         <PageViews />
         <Routes>
           <Route element={<AppShell />}>
-            <Route
-              index
-              element={
-                <RequireScope>
-                  <SalesDashboard />
-                </RequireScope>
-              }
-            />
+            {/* The five dashboards. The Overview is the landing page; the other
+                four are their own routes so a tab is a link somebody can send. */}
+            <Route index element={scoped(<OverviewDashboard />)} />
+            <Route path="dashboard">
+              <Route index element={<Navigate to="/" replace />} />
+              <Route path="pipeline" element={scoped(<PipelineDashboard />)} />
+              <Route path="fulfilment" element={scoped(<FulfilmentDashboard />)} />
+              <Route path="collections" element={scoped(<CollectionsDashboard />)} />
+              <Route path="forecast" element={scoped(<ForecastDashboard />)} />
+            </Route>
+            {/* The sidebar's "Pipeline" entry is the same board, reached directly. */}
+            <Route path="pipeline" element={<Navigate to="/dashboard/pipeline" replace />} />
+
             <Route path="quotations">
-              <Route index element={<RequireScope><Quotations /></RequireScope>} />
-              <Route path="new" element={<RequireScope><QuotationEditor /></RequireScope>} />
-              <Route path=":id" element={<RequireScope><QuotationDetail /></RequireScope>} />
-              <Route path=":id/revise" element={<RequireScope><QuotationEditor /></RequireScope>} />
+              <Route index element={scoped(<Quotations />)} />
+              <Route path="new" element={scoped(<QuotationEditor />)} />
+              <Route path=":id" element={scoped(<QuotationDetail />)} />
+              <Route path=":id/revise" element={scoped(<QuotationEditor />)} />
             </Route>
             <Route path="orders">
-              <Route index element={<RequireScope><Orders /></RequireScope>} />
-              <Route path=":id" element={<RequireScope><OrderDetail /></RequireScope>} />
+              <Route index element={scoped(<Orders />)} />
+              <Route path="new" element={scoped(<OrderEditor />)} />
+              <Route path=":id" element={scoped(<OrderDetail />)} />
+            </Route>
+            <Route path="customers">
+              <Route index element={scoped(<Customers />)} />
+              <Route path=":id" element={scoped(<CustomerDetail />)} />
             </Route>
             <Route path="returns">
-              <Route index element={<RequireScope><ReturnsList /></RequireScope>} />
-              <Route path=":id" element={<RequireScope><ReturnDetail /></RequireScope>} />
+              <Route index element={scoped(<ReturnsList />)} />
+              <Route path=":id" element={scoped(<ReturnDetail />)} />
             </Route>
-            <Route path="approvals" element={<RequireScope><Approvals /></RequireScope>} />
-            <Route path="price-books" element={<RequireScope><PriceBooks /></RequireScope>} />
-            <Route path="territories" element={<RequireScope><Territories /></RequireScope>} />
-            <Route path="settings" element={<RequireScope><Settings /></RequireScope>} />
+            <Route path="approvals" element={scoped(<Approvals />)} />
+            <Route path="targets" element={scoped(<Targets />)} />
+            <Route path="reports" element={scoped(<Reports />)} />
+            <Route path="price-books" element={scoped(<PriceBooks />)} />
+            <Route path="territories" element={scoped(<Territories />)} />
+            <Route path="settings" element={scoped(<Settings />)} />
             {/* The portal callback lands here once AuthProvider has consumed the token. */}
             <Route path="auth/callback" element={<Navigate to="/" replace />} />
             <Route path="*" element={<Notice tone="warning">That page does not exist.</Notice>} />

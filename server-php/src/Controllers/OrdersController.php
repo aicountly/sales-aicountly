@@ -8,6 +8,7 @@ use Aicountly\Api\Clients\InventoryClient;
 use Aicountly\Api\Domain\FulfilmentService;
 use Aicountly\Api\Domain\InvoiceRequestService;
 use Aicountly\Api\Domain\OrderService;
+use Aicountly\Api\Export;
 use Aicountly\Api\Http;
 use Aicountly\Api\Permissions;
 
@@ -19,7 +20,49 @@ final class OrdersController extends Controller
         Permissions::assert($ctx, $auth, 'order.view');
 
         $params = Http::listParams(['order_date', 'order_no', 'total_amount', 'status', 'committed_date', 'created_at'], 'order_date');
-        $result = (new OrderService($ctx, $auth))->search([
+        $result = (new OrderService($ctx, $auth))->search(self::filters(), $params['limit'], $params['offset'], $params['sort'], $params['order']);
+
+        Http::list($result['rows'], $result['total'], $params['limit'], $params['offset'], ['filters' => self::filters()]);
+    }
+
+    /**
+     * The same list as a CSV, under the same filters and the same permissions.
+     */
+    public static function export(): void
+    {
+        [$auth, $ctx] = self::enter();
+        Permissions::assert($ctx, $auth, 'order.view');
+        Permissions::assert($ctx, $auth, 'reports.view');
+
+        $result = (new OrderService($ctx, $auth))->search(
+            self::filters(),
+            Export::MAX_ROWS,
+            0,
+            Http::param('sort') ?? 'order_date',
+            strtolower((string) (Http::param('order') ?? 'desc')) === 'asc' ? 'ASC' : 'DESC',
+        );
+
+        Export::csv('sales-orders', [
+            'order_no'        => 'Order',
+            'order_date'      => 'Date',
+            'customer_name_snapshot' => 'Customer',
+            'customer_po_ref' => 'Customer PO',
+            'status'          => 'Status',
+            'committed_date'  => 'Promise date',
+            'currency_code'   => 'Currency',
+            'subtotal_amount' => 'Subtotal',
+            'discount_amount' => 'Discount',
+            'total_amount'    => 'Total',
+            'ordered_qty'     => 'Ordered qty',
+            'delivered_qty'   => 'Delivered qty',
+            'invoiced_qty'    => 'Invoiced qty',
+        ], $result['rows'], $result['total']);
+    }
+
+    /** @return array<string, mixed> */
+    private static function filters(): array
+    {
+        return [
             'status'              => Http::param('status'),
             'customer_account_id' => Http::intParam('customer_account_id'),
             'salesperson_id'      => Http::intParam('salesperson_id'),
@@ -27,11 +70,12 @@ final class OrdersController extends Controller
             'channel_id'          => Http::intParam('channel_id'),
             'from'                => Http::param('from'),
             'to'                  => Http::param('to'),
-            'q'                   => $params['q'],
+            'as_of'               => Http::param('as_of'),
+            'q'                   => trim((string) (Http::param('q') ?? '')),
             'open_only'           => Http::param('open_only') === '1',
-        ], $params['limit'], $params['offset'], $params['sort'], $params['order']);
-
-        Http::list($result['rows'], $result['total'], $params['limit'], $params['offset']);
+            'committed'           => Http::param('committed') === '1',
+            'late'                => Http::param('late') === '1',
+        ];
     }
 
     public static function show(string $id): void

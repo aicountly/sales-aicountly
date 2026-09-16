@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Building2, Loader2 } from 'lucide-react'
+import { Building2, ChevronDown, Loader2 } from 'lucide-react'
 import { Button, Field, Notice, Select } from '../ui'
 import { fetchAllCompanies, fetchCompanyInfo } from '../services/manage'
 import type { CompanyInfo, CompanyOption } from '../services/manage'
@@ -143,11 +143,49 @@ export function CompanyPicker() {
   // ---------------------------------------------------------------- render
 
   if (!open) {
+    // Collapsed, this is the header's context chip: which company, which year,
+    // which branch. It reads like a statement rather than a control because
+    // most of the time it is one — switching is rare and deliberate.
+    const [company, year] = (currentLabel ?? '').split(' · ')
+    const branch = scope?.bo_id ? `Branch ${scope.bo_id}` : 'All branches'
+
     return (
-      <Button tone="ghost" onClick={() => setOpen(true)}>
-        <Building2 size={15} aria-hidden />
-        {currentLabel ?? 'Change company'}
-      </Button>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        title="Change company, branch or financial year"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.6rem',
+          padding: '0.4rem 0.75rem',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-sm)',
+          background: 'var(--surface)',
+          cursor: 'pointer',
+          minWidth: 0,
+          maxWidth: '100%',
+        }}
+      >
+        <Building2 size={16} aria-hidden style={{ color: 'var(--brand)', flex: 'none' }} />
+        <span style={{ display: 'grid', textAlign: 'left', minWidth: 0 }}>
+          <span
+            style={{
+              fontWeight: 650,
+              fontSize: '0.9rem',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {company || 'Choose a company'}
+          </span>
+          <span style={{ color: 'var(--muted)', fontSize: '0.75rem' }}>
+            {[branch, year].filter(Boolean).join(' · ')}
+          </span>
+        </span>
+        <ChevronDown size={15} aria-hidden style={{ color: 'var(--muted)', flex: 'none' }} />
+      </button>
     )
   }
 

@@ -112,13 +112,60 @@ When Books or Inventory cannot be reached:
   means the first is a lie the user will act on;
 - a credit check that could not run reports `UNAVAILABLE`, never `ALLOW`.
 
+## The dashboards
+
+Five views, five endpoints, and each one loads only what it draws. A single fat
+`/dashboard` would make the Overview wait for the receivables ageing it does not
+show, which is how a dashboard ends up with a spinner people learn to scroll
+past.
+
+| View | Ours | Theirs, live |
+|---|---|---|
+| Overview | pipeline, commitments, priorities | invoiced sales, overdue (Books) |
+| Pipeline & Quotations | lanes, conversion, follow-ups | — |
+| Orders & Fulfilment | orders, delivery progress | availability (Inventory) |
+| Customers & Collections | buyers, cadence, follow-ups | balances and ageing (Books) |
+| Performance & Forecast | targets, projection, attribution | invoiced sales (Books) |
+
+Every figure's definition, and what it does when it cannot be worked out, is in
+[METRICS.md](METRICS.md). Two rules from it are worth repeating here because
+they are the architecture showing through:
+
+- **A KPI and its drilldown are one predicate.** `MetricsService` holds it, and
+  both the card and the list it opens are built from it. They cannot disagree.
+- **Missing is never zero.** A metric Books could not answer renders as
+  "Unavailable" with the reason, not as a figure somebody would act on.
+
+## The suggestions are rules, not a model
+
+`InsightService` produces every suggestion on every dashboard, in PHP, from
+records the user can open. Each one carries the ids it was derived from, and a
+suggestion with no evidence is not returned at all — that rule is what stops the
+panel becoming a horoscope. Its action is a name from a fixed list, resolved by
+the browser against its own route table, so nothing crossing that boundary can
+send anybody anywhere this application did not intend.
+
+Where a provider is configured for the company in console.aicountly.org, AI may
+rephrase the WORDING of a suggestion this product has already produced. It never
+invents one, never supplies a figure, never picks the action, and the call is
+server-side — there is no `VITE_` variable for a provider key, on purpose. With
+nothing configured every suggestion still works, labelled "Rule-based insight".
+
 ## Running the tests
 
 ```bash
-server-php/tests/run.sh
+server-php/tests/run.sh      # PHP: domain, metrics, forecast, ownership
+cd web && npm test           # React: formatting and the company-switch race
 ```
 
-Against a real PostgreSQL and a stub standing in for Books and Inventory. The
-suite includes the **release-blocking ownership tests**: they read
-`information_schema` and fail if a mirror table, a cached remote field or a
-stored balance has appeared anywhere in the schema.
+The PHP suite runs against a real PostgreSQL and a stub standing in for Books
+and Inventory, so what is exercised is the actual SQL, the actual HTTP client
+and the actual idempotency behaviour. It includes the **release-blocking
+ownership tests**: they read `information_schema` and fail if a mirror table, a
+cached remote field or a stored balance has appeared anywhere in the schema.
+
+Alongside them are the tests for the claims the dashboards make — that a
+superseded revision does not inflate the pipeline, that conversion is
+unavailable rather than 0% when nothing has been decided, that converting a
+quotation twice produces one order, and that the forecast does not count an
+invoiced order twice.
