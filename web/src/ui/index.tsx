@@ -223,11 +223,14 @@ export function Notice({
   title,
   children,
   action,
+  onDismiss,
 }: {
   tone?: 'info' | 'warning' | 'danger' | 'success'
   title?: string
   children?: ReactNode
   action?: ReactNode
+  /** When given, the notice can be closed. Errors otherwise pile up on screen. */
+  onDismiss?: () => void
 }) {
   const palette = {
     info: { bg: 'var(--info-bg)', fg: 'var(--info)' },
@@ -254,7 +257,27 @@ export function Notice({
         {title && <strong style={{ color: palette.fg, display: 'block' }}>{title}</strong>}
         {children && <div style={{ marginTop: title ? '0.2rem' : 0 }}>{children}</div>}
       </div>
-      {action}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexShrink: 0 }}>
+        {action}
+        {onDismiss && (
+          <button
+            type="button"
+            onClick={onDismiss}
+            aria-label="Dismiss"
+            style={{
+              background: 'none',
+              border: 'none',
+              color: palette.fg,
+              cursor: 'pointer',
+              fontSize: '1rem',
+              lineHeight: 1,
+              padding: '0 0.2rem',
+            }}
+          >
+            ×
+          </button>
+        )}
+      </div>
     </div>
   )
 }

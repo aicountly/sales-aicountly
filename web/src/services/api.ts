@@ -192,5 +192,13 @@ export const api = {
   del: <T>(path: string, params?: QueryParams) => request<ItemResponse<T>>(path, { method: 'DELETE', params }),
 
   /** Context-free: the health check and the portal relay. */
-  unscoped: <T>(path: string, params?: QueryParams) => request<T>(path, { method: 'GET', params, scoped: false }),
+  /**
+   * Context-free: the health check, the portal relay, and the company switcher.
+   *
+   * Takes a signal because the switcher pages through Manage and can be
+   * unmounted mid-flight; without it those pages keep arriving and setting
+   * state on a component that is gone.
+   */
+  unscoped: <T>(path: string, params?: QueryParams, signal?: AbortSignal) =>
+    request<T>(path, { method: 'GET', params, scoped: false, signal }),
 }
