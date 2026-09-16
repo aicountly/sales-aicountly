@@ -81,7 +81,12 @@ function Picker<T>({
 
   return (
     <div ref={boxRef} style={{ position: 'relative' }}>
-      <span style={{ display: 'block', fontSize: '0.8rem', color: 'var(--muted)', marginBottom: '0.25rem' }}>{label}</span>
+      <span style={{ display: 'block', fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
+        {label}
+        <span className="sales-required" aria-hidden>
+          *
+        </span>
+      </span>
       <div style={{ position: 'relative' }}>
         <Search
           size={14}
@@ -91,6 +96,7 @@ function Picker<T>({
         <input
           value={term}
           placeholder={selectedLabel ?? placeholder ?? 'Type to search…'}
+          aria-label={label}
           onChange={(event) => {
             setTerm(event.target.value)
             setOpen(true)
@@ -98,9 +104,10 @@ function Picker<T>({
           onFocus={() => setOpen(true)}
           style={{
             width: '100%',
-            padding: '0.4rem 0.55rem 0.4rem 1.7rem',
-            border: '1px solid var(--border-strong)',
-            borderRadius: 'var(--radius-sm)',
+            minHeight: 40,
+            padding: '9px 12px 9px 32px',
+            border: `1px solid ${selectedLabel ? '#80b977' : 'var(--line-strong, var(--border-strong))'}`,
+            borderRadius: 8,
             background: 'var(--surface)',
           }}
         />
@@ -114,11 +121,12 @@ function Picker<T>({
             top: '100%',
             left: 0,
             right: 0,
-            marginTop: '0.2rem',
+            marginTop: 4,
             background: 'var(--surface)',
             border: '1px solid var(--border-strong)',
-            borderRadius: 'var(--radius-sm)',
+            borderRadius: 10,
             boxShadow: 'var(--shadow-lg)',
+            overflow: 'hidden',
             maxHeight: '16rem',
             overflowY: 'auto',
           }}
@@ -130,7 +138,10 @@ function Picker<T>({
             </div>
           )}
           {!busy && !failed && options.length === 0 && (
-            <div style={{ padding: '0.6rem', color: 'var(--muted)' }}>No matches.</div>
+            <div style={{ padding: '10px 12px', color: 'var(--muted)' }}>
+              No matches. This list is read live from the product that owns it, so a brand-new record shows here as
+              soon as it is saved there.
+            </div>
           )}
           {options.map((option) => (
             <button
@@ -145,10 +156,12 @@ function Picker<T>({
                 display: 'block',
                 width: '100%',
                 textAlign: 'left',
-                padding: '0.45rem 0.6rem',
+                padding: '9px 12px',
                 border: 'none',
+                borderBottom: '1px solid var(--border)',
                 background: 'transparent',
                 cursor: 'pointer',
+                fontSize: 13,
               }}
             >
               {renderOption(option)}

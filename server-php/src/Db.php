@@ -56,13 +56,57 @@ final class Db
         return self::$pdo = $pdo;
     }
 
-    /** @param array<string|int, mixed> $params */
+    /**
+     * @param array<string|int, mixed> $params
+     */
     public static function run(string $sql, array $params = []): PDOStatement
     {
         $stmt = self::connect()->prepare($sql);
-        $stmt->execute($params);
+        $stmt->execute(self::onlyReferenced($sql, $params));
 
         return $stmt;
+    }
+
+    /**
+     * Drop named parameters the statement never mentions.
+     *
+     * WHY. A query is often assembled from optional fragments, and the bindings
+     * are gathered beside them — so a filter that is not applied leaves its
+     * binding behind. PDO then refuses the whole statement with "Invalid
+     * parameter number", which arrives at the user as "the database is not
+     * reachable" and sends whoever debugs it to the wrong half of the system.
+     *
+     * A parameter the SQL does not reference cannot change the result, so
+     * removing it is safe. The opposite mistake — a parameter the SQL needs and
+     * the caller did not supply — is untouched and still fails loudly, which is
+     * the error worth keeping.
+     *
+     * Positional (?) parameters are passed through: their meaning is their
+     * position, so nothing can be removed from the middle of them.
+     *
+     * @param array<string|int, mixed> $params
+     * @return array<string|int, mixed>
+     */
+    private static function onlyReferenced(string $sql, array $params): array
+    {
+        if ($params === [] || array_is_list($params)) {
+            return $params;
+        }
+
+        // Ignore anything inside a quoted literal: a customer name containing
+        // ":from" is text, not a placeholder.
+        $stripped = preg_replace("/'(?:[^']|'')*'/", "''", $sql) ?? $sql;
+        preg_match_all('/(?<![:\w]):([a-zA-Z_][a-zA-Z0-9_]*)/', $stripped, $matches);
+        $used = array_flip($matches[1]);
+
+        $out = [];
+        foreach ($params as $name => $value) {
+            if (is_int($name) || isset($used[ltrim((string) $name, ':')])) {
+                $out[$name] = $value;
+            }
+        }
+
+        return $out;
     }
 
     /**

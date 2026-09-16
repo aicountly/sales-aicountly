@@ -195,11 +195,23 @@ final class QuotationService
             'send'    => ['quotation.send', ['DRAFT', 'APPROVED'], 'SENT'],
             'accept'  => ['quotation.create', ['SENT', 'APPROVED'], 'ACCEPTED'],
             'decline' => ['quotation.create', ['SENT', 'APPROVED'], 'REJECTED'],
+            'expire'  => ['quotation.create', ['DRAFT', 'APPROVAL_PENDING', 'APPROVED', 'SENT'], 'EXPIRED'],
             'cancel'  => ['quotation.create', ['DRAFT', 'APPROVAL_PENDING', 'APPROVED', 'SENT'], 'CANCELLED'],
             default   => Http::validationFailed('Unknown action "' . $action . '".'),
         };
 
         Permissions::assert($this->ctx, $this->auth, $permission);
+
+        // Superseded first: a revision that has itself been revised is history,
+        // and "this version is not the one being discussed" is a more useful
+        // answer than a complaint about the status that version happens to hold.
+        $superseded = (bool) Db::scalar(
+            'SELECT EXISTS (SELECT 1 FROM sales_quotations s WHERE s.supersedes_id = :id)',
+            ['id' => $quotationId],
+        );
+        if ($superseded && !in_array($action, ['cancel', 'expire'], true)) {
+            Http::conflict('This revision has been superseded. Work on the latest revision instead.');
+        }
 
         if (!in_array($quotation['status'], $from, true)) {
             Http::conflict(sprintf(
@@ -227,7 +239,33 @@ final class QuotationService
             );
         }
         if ($action === 'send') {
+            // "Sent" has to mean something. Recording HOW and WHERE it went is
+            // what separates a document that left the building from a badge a
+            // click turned green: opening a draft dialog is not sending, and a
+            // status nothing can evidence is worse than no status at all.
+            $channel = self::text($input['channel'] ?? null);
+            $allowed = ['email', 'portal', 'whatsapp', 'printed', 'manual'];
+            if ($channel === null || !in_array($channel, $allowed, true)) {
+                Http::validationFailed(
+                    'Say how the quotation was sent (' . implode(', ', $allowed) . ').',
+                    ['field' => 'channel', 'allowed' => $allowed],
+                );
+            }
+            $reference = self::text($input['reference'] ?? null);
+            if ($reference === null) {
+                Http::validationFailed(
+                    'Record where it went — the address, the portal link, or who it was handed to.',
+                    ['field' => 'reference'],
+                );
+            }
+
             $changes['sent_at'] = self::now();
+            $changes['sent_channel'] = $channel;
+            $changes['sent_reference'] = $reference;
+            $changes['sent_by'] = $this->auth->uuid;
+        }
+        if ($action === 'expire') {
+            $changes['expired_at'] = self::now();
         }
         if (in_array($action, ['accept', 'decline'], true)) {
             $changes['decided_at'] = self::now();
@@ -253,8 +291,9 @@ final class QuotationService
     public function find(int $quotationId): array
     {
         $row = Db::first(
-            'SELECT * FROM sales_quotations WHERE quotation_id = :id AND cmp_id = :cmp',
-            ['id' => $quotationId, 'cmp' => $this->ctx->cmpId],
+            'SELECT q.*, ' . MetricsService::effectiveStatusSql() . ' AS effective_status
+               FROM sales_quotations q WHERE q.quotation_id = :id AND q.cmp_id = :cmp',
+            ['id' => $quotationId, 'cmp' => $this->ctx->cmpId, 'as_of' => gmdate('Y-m-d')],
         );
         if ($row === null) {
             return [];
@@ -271,7 +310,107 @@ final class QuotationService
             ['cmp' => $this->ctx->cmpId, 'id' => $quotationId],
         );
 
+        // The document's own history, so the detail page can show what changed
+        // and when without the user opening six tabs to piece it together.
+        $row['revisions'] = Db::all(
+            'WITH RECURSIVE chain AS (
+                 SELECT quotation_id, supersedes_id, revision_no, status, total_amount, created_at, created_by
+                   FROM sales_quotations WHERE quotation_id = :id AND cmp_id = :cmp
+                 UNION ALL
+                 SELECT q.quotation_id, q.supersedes_id, q.revision_no, q.status, q.total_amount, q.created_at, q.created_by
+                   FROM sales_quotations q JOIN chain c ON q.quotation_id = c.supersedes_id
+             )
+             SELECT * FROM chain ORDER BY revision_no DESC',
+            ['id' => $quotationId, 'cmp' => $this->ctx->cmpId],
+        );
+
+        $row['superseded_by'] = Db::scalar(
+            'SELECT quotation_id FROM sales_quotations WHERE supersedes_id = :id LIMIT 1',
+            ['id' => $quotationId],
+        );
+
+        $row['followups'] = Db::all(
+            'SELECT followup_id, channel, contacted_on, note, created_by
+               FROM sales_followups WHERE cmp_id = :cmp AND quotation_id = :id
+              ORDER BY contacted_on DESC, followup_id DESC LIMIT 20',
+            ['cmp' => $this->ctx->cmpId, 'id' => $quotationId],
+        );
+
+        // The order it became, if it became one — so the page can link to it
+        // instead of offering Convert again on a quotation already converted.
+        $order = Db::first(
+            "SELECT order_id, order_no, status FROM sales_orders
+              WHERE cmp_id = :cmp AND quotation_id = :id AND status <> 'CANCELLED' LIMIT 1",
+            ['cmp' => $this->ctx->cmpId, 'id' => $quotationId],
+        );
+        $row['converted_order'] = $order;
+
         return $row;
+    }
+
+    /**
+     * Build the order payload this quotation converts into.
+     *
+     * Composed HERE rather than in the browser. The client used to assemble it
+     * from whatever the detail page happened to be holding, which meant the
+     * agreed prices made a round trip through JavaScript before becoming a
+     * commitment — and a page with stale state would have committed stale terms.
+     *
+     * @return array<string, mixed>
+     */
+    public function conversionPayload(int $quotationId): array
+    {
+        $quotation = $this->find($quotationId);
+        if ($quotation === []) {
+            Http::notFound('That quotation does not exist.');
+        }
+
+        $lines = [];
+        foreach ($quotation['lines'] as $line) {
+            // An optional line is an offer the customer did not have to take.
+            // Committing to it because it was on the page is how an order grows
+            // an item nobody agreed to buy.
+            if (!empty($line['is_optional'])) {
+                continue;
+            }
+            $lines[] = [
+                'quotation_line_id' => (int) $line['line_id'],
+                'item_id'           => $line['item_id'] === null ? null : (int) $line['item_id'],
+                'unit_id'           => $line['unit_id'] === null ? null : (int) $line['unit_id'],
+                'warehouse_id'      => $line['warehouse_id'] === null ? null : (int) $line['warehouse_id'],
+                'is_service'        => (bool) $line['is_service'],
+                'description'       => $line['description'],
+                'ordered_qty'       => (float) $line['quantity'],
+                'rate'              => (float) $line['rate'],
+                'discount_pc'       => (float) $line['discount_pc'],
+                'discount_amount'   => (float) $line['discount_amount'],
+                'tax_cat_id'        => $line['tax_cat_id'] === null ? null : (int) $line['tax_cat_id'],
+                'estimated_tax_pc'  => (float) $line['estimated_tax_pc'],
+            ];
+        }
+
+        if ($lines === []) {
+            Http::validationFailed('Every line on this quotation is optional, so there is nothing to order.');
+        }
+
+        return [
+            'quotation_id'        => $quotationId,
+            'customer_account_id' => (int) $quotation['customer_account_id'],
+            'customer_name'       => $quotation['customer_name_snapshot'],
+            'contact_id'          => $quotation['contact_id'],
+            'salesperson_id'      => $quotation['salesperson_id'],
+            'territory_id'        => $quotation['territory_id'],
+            'channel_id'          => $quotation['channel_id'],
+            'price_book_id'       => $quotation['price_book_id'],
+            'payment_terms'       => $quotation['payment_terms'],
+            'delivery_terms'      => $quotation['delivery_terms'],
+            'incoterm'            => $quotation['incoterm'],
+            'customer_po_ref'     => $quotation['customer_po_ref'],
+            'currency_code'       => $quotation['currency_code'],
+            'exchange_rate'       => (float) $quotation['exchange_rate'],
+            'notes'               => $quotation['notes'],
+            'lines'               => $lines,
+        ];
     }
 
     /**
@@ -309,18 +448,52 @@ final class QuotationService
         }
         // Only the latest revision, unless the caller asks for the history.
         if (empty($filters['include_superseded'])) {
-            $where[] = 'NOT EXISTS (SELECT 1 FROM sales_quotations s WHERE s.supersedes_id = q.quotation_id)';
+            $where[] = MetricsService::latestRevision();
         }
 
+        // The filters the dashboard KPIs drill into. They are the SAME predicate
+        // the cards are counted with, so a card saying 14 opens a list of 14 —
+        // a dashboard whose drilldown disagrees with it teaches people to
+        // trust neither number.
+        $asOf = (string) ($filters['as_of'] ?? gmdate('Y-m-d'));
+        if (!empty($filters['open'])) {
+            $where[] = MetricsService::quotationOpen();
+            $params['as_of'] = $asOf;
+        }
+        if (!empty($filters['expired'])) {
+            $where[] = MetricsService::quotationExpired();
+            $params['as_of'] = $asOf;
+        }
+        if (!empty($filters['expiring_days'])) {
+            $params['expiring_days'] = (int) $filters['expiring_days'];
+            $params['as_of'] = $asOf;
+            $where[] = MetricsService::quotationOpen()
+                . ' AND q.valid_until IS NOT NULL AND q.valid_until <= (:as_of::date + :expiring_days::int)';
+        }
+
+        // `as_of` is bound for the count query only when the WHERE clause uses
+        // it. The driver rejects a parameter the statement never mentions, so
+        // binding it unconditionally breaks every unfiltered list.
+        $rowParams = $params + ['as_of' => $asOf];
+
         $clause = implode(' AND ', $where);
-        $sortable = ['quotation_date', 'quotation_no', 'total_amount', 'status', 'created_at'];
+        $sortable = ['quotation_date', 'quotation_no', 'total_amount', 'status', 'valid_until', 'created_at'];
         $sortColumn = in_array($sort, $sortable, true) ? $sort : 'quotation_date';
 
         $rows = Db::all(
-            "SELECT q.* FROM sales_quotations q WHERE {$clause}
-             ORDER BY q.{$sortColumn} {$order}, q.quotation_id {$order}
-             LIMIT {$limit} OFFSET {$offset}",
-            $params,
+            'SELECT q.*,
+                    ' . MetricsService::effectiveStatusSql() . ' AS effective_status,
+                    (SELECT o.order_id FROM sales_orders o
+                      WHERE o.cmp_id = q.cmp_id AND o.quotation_id = q.quotation_id
+                        AND o.status <> \'CANCELLED\' LIMIT 1) AS converted_order_id,
+                    (SELECT o.order_no FROM sales_orders o
+                      WHERE o.cmp_id = q.cmp_id AND o.quotation_id = q.quotation_id
+                        AND o.status <> \'CANCELLED\' LIMIT 1) AS converted_order_no
+               FROM sales_quotations q
+              WHERE ' . $clause . "
+              ORDER BY q.{$sortColumn} {$order} NULLS LAST, q.quotation_id {$order}
+              LIMIT {$limit} OFFSET {$offset}",
+            $rowParams,
         );
         $total = (int) Db::scalar("SELECT COUNT(*) FROM sales_quotations q WHERE {$clause}", $params);
 

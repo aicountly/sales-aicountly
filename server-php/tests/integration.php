@@ -23,8 +23,11 @@ require __DIR__ . '/../src/Autoload.php';
 Env::load(__DIR__ . '/../.env');
 
 use Aicountly\Api\Domain\CreditControlService;
+use Aicountly\Api\Domain\ForecastService;
 use Aicountly\Api\Domain\FulfilmentService;
+use Aicountly\Api\Domain\InsightService;
 use Aicountly\Api\Domain\InvoiceRequestService;
+use Aicountly\Api\Domain\MetricsService;
 use Aicountly\Api\Domain\OrderService;
 use Aicountly\Api\Domain\QuotationService;
 use Aicountly\Api\Domain\ReturnService;
@@ -141,7 +144,7 @@ function resetDatabase(): void
         'sales_price_book_rules', 'sales_price_books', 'sales_people',
         'sales_channels', 'sales_territories', 'sales_settings',
         'sales_commission_calculations', 'sales_commission_rules', 'sales_targets',
-        'sales_permission_assignments', 'sales_permission_profiles',
+        'sales_permission_assignments', 'sales_permission_profiles', 'sales_followups',
         'sales_portal_acceptances', 'sales_user_preferences',
     ];
     // TRUNCATE, not DELETE: the audit table's row-level triggers refuse DELETE,
@@ -691,6 +694,371 @@ check('a query for another company returns nothing', function () use ($ctx, $aut
     $other = freshContext(999);
     $result = (new QuotationService($other, $auth))->search([], 50, 0, 'quotation_date', 'DESC');
     assertSame(0, $result['total'], 'company 999 sees none of company 77 rows');
+});
+
+
+// ---------------------------------------------------------------------------
+// Dashboard metrics — the numbers five screens are built on
+// ---------------------------------------------------------------------------
+
+echo "\nDashboard metrics\n";
+
+check('a superseded revision does not inflate the open pipeline', function () use ($ctx, $auth) {
+    resetDatabase();
+    $quotations = new QuotationService($ctx, $auth);
+    $original = $quotations->create(quotationInput());
+    $quotations->revise((int) $original['quotation_id'], []);
+
+    $metrics = new MetricsService($ctx);
+    $open = $metrics->openPipeline('2026-09-16');
+
+    // Two rows exist, one offer does. Counting both was the old behaviour and
+    // it doubled the pipeline every time somebody adjusted a price.
+    assertSame(2, (int) Db::scalar('SELECT COUNT(*) FROM sales_quotations'), 'both revisions are stored');
+    assertSame(1, $open['count'], 'only the latest revision is open');
+});
+
+check('a quotation past its validity leaves the open pipeline without a cron', function () use ($ctx, $auth) {
+    resetDatabase();
+    $quotations = new QuotationService($ctx, $auth);
+    $quotation = $quotations->create(quotationInput(['valid_until' => '2026-09-14']));
+    $quotations->transition((int) $quotation['quotation_id'], 'send', ['channel' => 'email', 'reference' => 'buyer@example.com']);
+
+    $metrics = new MetricsService($ctx);
+    assertSame(1, $metrics->openPipeline('2026-09-13')['count'], 'inside validity it is open');
+    assertSame(0, $metrics->openPipeline('2026-09-15')['count'], 'past validity it is not');
+    assertSame(1, $metrics->openPipeline('2026-09-15')['expired_count'], 'and it is reported as expired');
+});
+
+check('conversion is unavailable rather than 0% when nothing has been decided', function () use ($ctx, $auth) {
+    resetDatabase();
+    (new QuotationService($ctx, $auth))->create(quotationInput());
+
+    $conversion = (new MetricsService($ctx))->quoteConversion('2026-09-01', '2026-09-30', '2026-09-16');
+    assertSame(false, $conversion['available'], 'no decisions means no rate');
+    assertSame(null, $conversion['rate_pc'], '0% would read as "we convert nothing"');
+});
+
+check('conversion counts accepted over decided, not over every quotation', function () use ($ctx, $auth) {
+    resetDatabase();
+    $quotations = new QuotationService($ctx, $auth);
+
+    $accepted = $quotations->create(quotationInput());
+    $quotations->transition((int) $accepted['quotation_id'], 'send', ['channel' => 'email', 'reference' => 'a@example.com']);
+    $quotations->transition((int) $accepted['quotation_id'], 'accept');
+
+    $declined = $quotations->create(quotationInput());
+    $quotations->transition((int) $declined['quotation_id'], 'send', ['channel' => 'email', 'reference' => 'b@example.com']);
+    $quotations->transition((int) $declined['quotation_id'], 'decline');
+
+    // A draft nobody has answered has not failed to convert.
+    $quotations->create(quotationInput());
+
+    $conversion = (new MetricsService($ctx))->quoteConversion('2026-09-01', '2026-09-30', '2026-09-16');
+    assertSame(2, $conversion['decided'], 'the draft is not in the denominator');
+    assertSame(50.0, $conversion['rate_pc'], 'one of two decided');
+});
+
+check('a target that was never set reads as not configured, never as zero', function () use ($ctx) {
+    resetDatabase();
+    $target = (new MetricsService($ctx))->companyTarget('2026-09-01', '2026-09-30');
+
+    assertSame(false, $target['configured'], 'no target is configured');
+    assertSame(null, $target['value'], 'and none is invented — a zero target makes every month a triumph');
+});
+
+check('order stage counts are milestones, not a funnel', function () use ($ctx, $auth) {
+    resetDatabase();
+    $order = (new OrderService($ctx, $auth))->create(orderInput());
+    (new OrderService($ctx, $auth))->confirm((int) $order['order_id']);
+
+    $stages = (new MetricsService($ctx))->orderStages();
+    $byKey = [];
+    foreach ($stages['stages'] as $stage) {
+        $byKey[$stage['key']] = $stage['count'];
+    }
+
+    // Reserved must not subtract from confirmed: the same order is at both.
+    assertSame(1, $byKey['confirmed'], 'the order is confirmed');
+    assertSame(1, $byKey['reserved'], 'and reserved, and still counted as confirmed');
+    assertTrue(str_contains($stages['basis'], 'not the stages of a funnel'), 'the basis says so');
+});
+
+check('on-time delivery is unavailable with nothing measurable', function () use ($ctx, $auth) {
+    resetDatabase();
+    (new OrderService($ctx, $auth))->create(orderInput());
+
+    $onTime = (new MetricsService($ctx))->onTimeDelivery('2026-09-01', '2026-09-30');
+    assertSame(false, $onTime['available'], 'nothing has completed');
+    assertSame(null, $onTime['rate_pc'], 'so there is no rate');
+});
+
+check('the drilldown returns exactly what the KPI counted', function () use ($ctx, $auth) {
+    resetDatabase();
+    $quotations = new QuotationService($ctx, $auth);
+    $quotations->create(quotationInput());
+    $lapsed = $quotations->create(quotationInput(['valid_until' => '2026-09-01']));
+    $quotations->transition((int) $lapsed['quotation_id'], 'send', ['channel' => 'email', 'reference' => 'c@example.com']);
+
+    $card = (new MetricsService($ctx))->openPipeline('2026-09-16')['count'];
+    $list = $quotations->search(['open' => true, 'as_of' => '2026-09-16'], 50, 0, 'quotation_date', 'DESC');
+
+    assertSame($card, $list['total'], 'the card and the list it opens agree');
+    assertSame(1, $card, 'and the lapsed one is in neither');
+});
+
+// ---------------------------------------------------------------------------
+// Workflow rectifications
+// ---------------------------------------------------------------------------
+
+echo "\nWorkflow rectifications\n";
+
+check('converting the same quotation twice returns one order, not two', function () use ($ctx, $auth) {
+    resetDatabase();
+    $quotations = new QuotationService($ctx, $auth);
+    $quotation = $quotations->create(quotationInput());
+    $quotationId = (int) $quotation['quotation_id'];
+    $quotations->transition($quotationId, 'send', ['channel' => 'email', 'reference' => 'd@example.com']);
+    $quotations->transition($quotationId, 'accept');
+
+    $orders = new OrderService($ctx, $auth);
+    $payload = $quotations->conversionPayload($quotationId);
+
+    $first = $orders->create($payload);
+    $second = $orders->create($payload);
+
+    assertSame((int) $first['order_id'], (int) $second['order_id'], 'the second attempt gets the first order');
+    assertSame(1, (int) Db::scalar('SELECT COUNT(*) FROM sales_orders'), 'and only one order exists');
+});
+
+check('a superseded quotation cannot become an order', function () use ($ctx, $auth) {
+    resetDatabase();
+    $quotations = new QuotationService($ctx, $auth);
+    $original = $quotations->create(quotationInput());
+    $originalId = (int) $original['quotation_id'];
+    $payload = $quotations->conversionPayload($originalId);
+    $quotations->revise($originalId, []);
+
+    assertThrows(
+        static fn () => (new OrderService($ctx, $auth))->create($payload),
+        'revised',
+        'converting a superseded revision',
+    );
+});
+
+check('an optional line is not committed by a conversion', function () use ($ctx, $auth) {
+    resetDatabase();
+    $quotations = new QuotationService($ctx, $auth);
+    $quotation = $quotations->create(quotationInput(['lines' => [
+        ['item_id' => 101, 'unit_id' => 1, 'quantity' => 10, 'rate' => 100],
+        ['item_id' => 102, 'unit_id' => 1, 'quantity' => 5, 'rate' => 200, 'is_optional' => true],
+    ]]));
+
+    $payload = $quotations->conversionPayload((int) $quotation['quotation_id']);
+    assertSame(1, count($payload['lines']), 'the optional line is left off the order');
+});
+
+check('sending needs a channel and a reference, not just a click', function () use ($ctx, $auth) {
+    resetDatabase();
+    $quotations = new QuotationService($ctx, $auth);
+    $quotation = $quotations->create(quotationInput());
+    $id = (int) $quotation['quotation_id'];
+
+    assertThrows(static fn () => $quotations->transition($id, 'send'), 'how the quotation was sent', 'send with no channel');
+    assertThrows(
+        static fn () => $quotations->transition($id, 'send', ['channel' => 'email']),
+        'Record where it went',
+        'send with no reference',
+    );
+
+    $sent = $quotations->transition($id, 'send', ['channel' => 'email', 'reference' => 'buyer@example.com']);
+    assertSame('SENT', $sent['status'], 'a real send moves the status');
+    assertSame('email', $sent['sent_channel'], 'and records how');
+    assertSame('buyer@example.com', $sent['sent_reference'], 'and records where');
+});
+
+check('order status is decomposed into the questions it was conflating', function () use ($ctx, $auth) {
+    resetDatabase();
+    $orders = new OrderService($ctx, $auth);
+    $order = $orders->create(orderInput());
+    $confirmed = $orders->confirm((int) $order['order_id']);
+    $facets = $confirmed['facets'];
+
+    assertSame('confirmed', $facets['approval']['state'], 'approval is its own answer');
+    assertSame('reserved', $facets['stock']['state'], 'stock is its own answer');
+    assertSame('none', $facets['fulfilment']['state'], 'nothing has shipped');
+    assertSame('none', $facets['invoice']['state'], 'and nothing is billed');
+    // Whether the customer paid is Books' answer and this product must not guess.
+    assertSame('ask_books', $facets['payment']['state'], 'payment is deferred to the accounts');
+});
+
+check('a superseded revision cannot be sent or accepted', function () use ($ctx, $auth) {
+    resetDatabase();
+    $quotations = new QuotationService($ctx, $auth);
+    $original = $quotations->create(quotationInput());
+    $originalId = (int) $original['quotation_id'];
+    $quotations->revise($originalId, []);
+
+    // Revising already moves the predecessor out of a sendable status. Put it
+    // back to SENT by hand so the SUPERSEDED guard itself is what is tested,
+    // rather than the status check that happens to run first.
+    Db::run("UPDATE sales_quotations SET status = 'SENT' WHERE quotation_id = :id", ['id' => $originalId]);
+
+    assertThrows(
+        static fn () => $quotations->transition($originalId, 'send', ['channel' => 'email', 'reference' => 'x@example.com']),
+        'superseded',
+        'sending a superseded revision',
+    );
+    assertThrows(
+        static fn () => $quotations->transition($originalId, 'accept'),
+        'superseded',
+        'accepting a superseded revision',
+    );
+
+    // Cancelling and expiring one are still allowed: tidying up history is not
+    // the same as acting on an offer nobody is discussing.
+    $cancelled = $quotations->transition($originalId, 'cancel');
+    assertSame('CANCELLED', $cancelled['status'], 'a superseded revision can still be closed off');
+});
+
+// ---------------------------------------------------------------------------
+// Forecast
+// ---------------------------------------------------------------------------
+
+echo "\nForecast\n";
+
+check('the forecast does not count an invoiced order twice', function () use ($ctx, $auth) {
+    resetDatabase();
+    $orders = new OrderService($ctx, $auth);
+    $order = $orders->create(orderInput(['committed_date' => '2026-09-20']));
+    $orderId = (int) $order['order_id'];
+    $orders->confirm($orderId);
+    (new FulfilmentService($ctx, $auth))->requestIssue($orderId, []);
+    (new InvoiceRequestService($ctx, $auth))->request($orderId, ['basis' => 'delivered']);
+
+    $metrics = new MetricsService($ctx);
+    $actual = [
+        'status' => 'ready', 'value' => 100000.0, 'reason' => null,
+        'basis' => 'test actual', 'source' => 'books',
+    ];
+    $projection = (new ForecastService($ctx, $metrics))
+        ->project('2026-09-01', '2026-09-30', '2026-09-16', $actual);
+
+    $backlog = null;
+    foreach ($projection['components'] as $component) {
+        if ($component['key'] === 'backlog') {
+            $backlog = (float) $component['value'];
+        }
+    }
+
+    // Fully delivered and fully invoiced: its value is already inside the
+    // actual, so adding it again would report the same sale twice.
+    assertSame(0.0, $backlog, 'a fully invoiced order contributes nothing more');
+});
+
+check('an uninvoiced order contributes only its uninvoiced part', function () use ($ctx, $auth) {
+    resetDatabase();
+    $orders = new OrderService($ctx, $auth);
+    $order = $orders->create(orderInput(['committed_date' => '2026-09-20']));
+    $orders->confirm((int) $order['order_id']);
+
+    $actual = ['status' => 'ready', 'value' => 0.0, 'reason' => null, 'basis' => 't', 'source' => 'books'];
+    $projection = (new ForecastService($ctx, new MetricsService($ctx)))
+        ->project('2026-09-01', '2026-09-30', '2026-09-16', $actual);
+
+    $backlog = 0.0;
+    foreach ($projection['components'] as $component) {
+        if ($component['key'] === 'backlog') {
+            $backlog = (float) $component['value'];
+        }
+    }
+
+    // 100 x 120 + 50 x 200, nothing billed.
+    assertSame(22000.0, $backlog, 'the whole order is still to bill');
+});
+
+check('the chart ends exactly where the projected KPI says', function () use ($ctx, $auth) {
+    resetDatabase();
+    (new OrderService($ctx, $auth))->create(orderInput(['committed_date' => '2026-09-20']));
+
+    $metrics = new MetricsService($ctx);
+    $forecast = new ForecastService($ctx, $metrics);
+    $actual = ['status' => 'ready', 'value' => 50000.0, 'reason' => null, 'basis' => 't', 'source' => 'books'];
+    $projection = $forecast->project('2026-09-01', '2026-09-30', '2026-09-16', $actual);
+    $series = $forecast->series($metrics->dailyOrderTrend('2026-09-01', '2026-09-30', '2026-09-16'), $projection, '2026-09-30');
+
+    $last = end($series);
+    assertSame('2026-09-30', $last['date'], 'the line runs to the end of the period');
+    assertSame($projection['projected']['mid'], $last['projected'], 'and lands on the number the card shows');
+});
+
+check('a projection with no measured conversion still stands on what is committed', function () use ($ctx, $auth) {
+    resetDatabase();
+    // A quotation nobody has decided: there is no rate to weight it with, and
+    // inventing one would be inventing a forecast.
+    (new QuotationService($ctx, $auth))->create(quotationInput());
+
+    $actual = ['status' => 'ready', 'value' => 1000.0, 'reason' => null, 'basis' => 't', 'source' => 'books'];
+    $projection = (new ForecastService($ctx, new MetricsService($ctx)))
+        ->project('2026-09-01', '2026-09-30', '2026-09-16', $actual);
+
+    assertSame(true, $projection['available'], 'the projection still works');
+    assertSame(1000.0, $projection['projected']['mid'], 'and adds no pipeline it cannot weight');
+    assertTrue(
+        str_contains((string) $projection['reason'], 'not weighted'),
+        'and says why the pipeline was left out',
+    );
+});
+
+check('the forecast is unavailable when the actual cannot be read', function () use ($ctx) {
+    resetDatabase();
+    $actual = [
+        'status' => 'unavailable', 'value' => null,
+        'reason' => 'Smart Books could not be reached.', 'basis' => 't', 'source' => 'books',
+    ];
+    $projection = (new ForecastService($ctx, new MetricsService($ctx)))
+        ->project('2026-09-01', '2026-09-30', '2026-09-16', $actual);
+
+    assertSame(false, $projection['available'], 'no actual, no projection');
+    assertSame(null, $projection['projected'], 'and no number invented in its place');
+});
+
+// ---------------------------------------------------------------------------
+// Insights
+// ---------------------------------------------------------------------------
+
+echo "\nInsights\n";
+
+check('every suggestion cites records the user can open', function () use ($ctx, $auth) {
+    resetDatabase();
+    $quotations = new QuotationService($ctx, $auth);
+    $quotation = $quotations->create(quotationInput(['valid_until' => '2026-09-18']));
+    $quotations->transition((int) $quotation['quotation_id'], 'send', ['channel' => 'email', 'reference' => 'e@example.com']);
+
+    $insights = (new InsightService($ctx, new MetricsService($ctx)))->overview('2026-09-16', ['currency' => 'INR']);
+    assertTrue(count($insights) > 0, 'there is something to suggest');
+    foreach ($insights as $insight) {
+        assertTrue($insight['evidence'] !== [], 'the suggestion names its evidence');
+        assertSame('rule', $insight['origin'], 'and is produced by code, not a model');
+    }
+});
+
+check('nothing to do produces no suggestions rather than an invented one', function () use ($ctx) {
+    resetDatabase();
+    $insights = (new InsightService($ctx, new MetricsService($ctx)))->overview('2026-09-16', ['currency' => 'INR']);
+    assertSame(0, count($insights), 'an empty panel is a valid answer');
+});
+
+check('a reorder suggestion needs a real rhythm, not two orders', function () use ($ctx, $auth) {
+    resetDatabase();
+    $orders = new OrderService($ctx, $auth);
+    foreach (['2026-07-01', '2026-08-01'] as $date) {
+        $order = $orders->create(orderInput(['order_date' => $date]));
+        $orders->confirm((int) $order['order_id']);
+    }
+
+    $candidates = (new MetricsService($ctx))->reorderCandidates('2026-09-16');
+    assertSame(0, count($candidates), 'two orders is a line, not a pattern');
 });
 
 // ---------------------------------------------------------------------------

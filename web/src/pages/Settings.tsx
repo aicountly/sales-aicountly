@@ -42,8 +42,13 @@ export default function Settings() {
   if (loading) return <p style={{ color: 'var(--muted)' }}>Loading…</p>
 
   return (
-    <div style={{ display: 'grid', gap: '1rem', maxWidth: '48rem' }}>
-      <h1 style={{ margin: 0, fontSize: '1.3rem' }}>Settings</h1>
+    <div className="sales-stack" style={{ maxWidth: '48rem' }}>
+      <header className="sales-page-header">
+        <div>
+          <h1>Settings</h1>
+          <p>How this company numbers its documents and where its limits sit.</p>
+        </div>
+      </header>
 
       {error && <Notice tone="danger" title="Could not save">{error}</Notice>}
       {saved && <Notice tone="success">Saved.</Notice>}

@@ -6,20 +6,30 @@ import type { ReturnRequest } from '../services/types'
 import { useApi } from '../hooks/useApi'
 import { useSales } from '../context/SalesContext'
 import { CommandStrip } from '../components/CommandStrip'
-import { Button, Card, DataTable, date, money, Notice, qty, StatusBadge } from '../ui'
+import { Button, Card, DataTable, date, money, Notice, Pagination, qty, StatusBadge } from '../ui'
 
 export function ReturnsList() {
   const navigate = useNavigate()
   const { scope } = useSales()
+  const [offset, setOffset] = useState(0)
+  const limit = 25
+
+  // Server paging, not a hard-coded 100: a list that silently stops at a round
+  // number is a list somebody eventually looks past and does not find.
   const { data, loading, error, reload } = useApi(
-    (signal) => api.list<ReturnRequest>('v1/returns', { limit: 100 }, signal),
-    [scope?.cmp_id, scope?.fy_id, scope?.bo_id],
+    (signal) => api.list<ReturnRequest>('v1/returns', { limit, offset }, signal),
+    [scope?.cmp_id, scope?.fy_id, scope?.bo_id, offset],
     Boolean(scope),
   )
 
   return (
-    <div style={{ display: 'grid', gap: '1rem' }}>
-      <h1 style={{ margin: 0, fontSize: '1.3rem' }}>Returns</h1>
+    <div className="sales-stack">
+      <header className="sales-page-header">
+        <div>
+          <h1>Returns</h1>
+          <p>Goods coming back, and what happens to the money.</p>
+        </div>
+      </header>
 
       {error && (
         <Notice tone="danger" title="Could not load returns">
@@ -32,7 +42,11 @@ export function ReturnsList() {
         Books issues the credit — this screen links the three without holding a copy of either.
       </Notice>
 
-      <Card title={`${data?.meta.total ?? 0} return${(data?.meta.total ?? 0) === 1 ? '' : 's'}`}>
+      <Card
+        title={`${data?.meta.total ?? 0} return${(data?.meta.total ?? 0) === 1 ? '' : 's'}`}
+        flush
+        footer={<Pagination total={data?.meta.total ?? 0} limit={limit} offset={offset} label="returns" onChange={setOffset} />}
+      >
         <DataTable
           loading={loading}
           rows={data?.data ?? []}
@@ -85,11 +99,11 @@ export function ReturnDetail() {
   if (!rma) return <Notice tone="warning">That return does not exist.</Notice>
 
   return (
-    <div style={{ display: 'grid', gap: '1rem' }}>
+    <div className="sales-stack">
       <header style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
         <div>
           <Link to="/returns" style={{ fontSize: '0.85rem' }}>← Returns</Link>
-          <h1 style={{ margin: '0.25rem 0 0', fontSize: '1.3rem', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+          <h1 className="sales-row" style={{ marginTop: 6, gap: 12 }}>
             {rma.rma_no}
             <StatusBadge status={rma.status} />
           </h1>
